@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PM Automation System — Dashboard</title>
+  <link rel="stylesheet" href="/frontend/static/css/styles.css" />
+</head>
+<body>
+<div class="layout">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>⚙️ PM Automation</h2>
+      <p>Preventive Maintenance System</p>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">Main</div>
+      <a class="nav-item active" onclick="showPage('dashboard')" href="#">
+        <span class="icon">📊</span> Dashboard
+      </a>
+      <a class="nav-item" onclick="showPage('generate')" href="#">
+        <span class="icon">📄</span> Generate PM
+      </a>
+      <a class="nav-item" onclick="showPage('history')" href="#">
+        <span class="icon">🕐</span> PM History
+      </a>
+      <div class="nav-section">Library</div>
+      <a class="nav-item" onclick="showPage('library')" href="#">
+        <span class="icon">📚</span> PM Library
+      </a>
+      <a class="nav-item" onclick="showPage('machines')" href="#">
+        <span class="icon">🏭</span> Machines
+      </a>
+      <div class="nav-section" id="nav-section-upload">Engineer</div>
+      <a class="nav-item" id="nav-upload" onclick="showPage('upload')" href="#">
+        <span class="icon">⬆️</span> Upload Manual
+      </a>
+      <div class="nav-section" id="nav-section-manager">Manager</div>
+      <a class="nav-item" id="nav-export" onclick="showPage('export')" href="#">
+        <span class="icon">📤</span> Export Data
+      </a>
+      <a class="nav-item" id="nav-checklist" onclick="showPage('checklist')" href="#">
+        <span class="icon">✅</span> Fill Checklist
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="userAvatar">?</div>
+        <div>
+          <div class="user-name" id="userName">Loading...</div>
+          <div class="user-role" id="userRole">—</div>
+        </div>
+      </div>
+      <button class="btn-logout" onclick="logout()">Sign Out</button>
+    </div>
+  </aside>
+
+  <!-- ── Main Content ──────────────────────────────────────────────────── -->
+  <main class="main-content">
+    <div class="topbar">
+      <h1 id="pageTitle">Dashboard</h1>
+      <div class="topbar-actions">
+        <span id="topbarEnv" class="badge badge-amber" style="display:none">DEV MODE</span>
+        <button class="btn btn-primary btn-sm" onclick="showPage('generate')">
+          ＋ Generate PM
+        </button>
+      </div>
+    </div>
+
+    <!-- ── DASHBOARD PAGE ── -->
+    <div class="page active" id="page-dashboard">
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat-card"><div class="stat-icon">📋</div><div><div class="stat-value" id="stat-total">—</div><div class="stat-label">Total PMs Generated</div></div></div>
+        <div class="stat-card green"><div class="stat-icon">✅</div><div><div class="stat-value" id="stat-month">—</div><div class="stat-label">Completed This Month</div></div></div>
+        <div class="stat-card red"><div class="stat-icon">⚠️</div><div><div class="stat-value" id="stat-overdue">—</div><div class="stat-label">Overdue PMs</div></div></div>
+        <div class="stat-card amber"><div class="stat-icon">🔔</div><div><div class="stat-value" id="stat-duesoon">—</div><div class="stat-label">Due Soon</div></div></div>
+        <div class="stat-card"><div class="stat-icon">🏭</div><div><div class="stat-value" id="stat-machines">—</div><div class="stat-label">Machines in System</div></div></div>
+        <div class="stat-card purple"><div class="stat-icon">📝</div><div><div class="stat-value" id="stat-tasks">—</div><div class="stat-label">Total Tasks in Library</div></div></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <!-- Overdue -->
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title" style="color:var(--red)">⚠️ Overdue PMs</h3>
+            <span id="overdueBadge" class="badge badge-red">0</span>
+          </div>
+          <div class="table-wrapper">
+            <table id="overdueTable">
+              <thead><tr><th>Machine</th><th>Interval</th><th>Status</th><th></th></tr></thead>
+              <tbody id="overdueBody">
+                <tr><td colspan="4" class="empty-state"><p>Loading...</p></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Recent PMs -->
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">🕐 Recent PMs</h3>
+          </div>
+          <div class="table-wrapper">
+            <table id="recentTable">
+              <thead><tr><th>Machine</th><th>Interval</th><th>Technician</th><th>Status</th></tr></thead>
+              <tbody id="recentBody">
+                <tr><td colspan="4" class="empty-state"><p>Loading...</p></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PM Schedule -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">📅 PM Schedule — All Intervals</h3>
+          <button class="btn btn-outline btn-sm" onclick="loadDashboard()">↻ Refresh</button>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Machine</th><th>Interval</th><th>Last Done</th><th>Next Due</th><th>Status</th><th>Action</th></tr></thead>
+            <tbody id="scheduleBody">
+              <tr><td colspan="6"><div class="empty-state"><p>Loading schedule...</p></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── GENERATE PAGE ── -->
+    <div class="page" id="page-generate">
+      <div class="card" style="max-width:640px">
+        <div class="card-header">
+          <h3 class="card-title">Generate PM Checklist</h3>
+        </div>
+        <div id="genAlert"></div>
+        <form id="generateForm" onsubmit="submitGenerate(event)">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Machine *</label>
+              <select id="gen-machine" required onchange="loadIntervals()">
+                <option value="">Select machine...</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>PM Interval *</label>
+              <select id="gen-interval" required>
+                <option value="">Select interval...</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Work Order # *</label>
+              <input type="text" id="gen-wo" required placeholder="WO-2026-001" />
+            </div>
+            <div class="form-group">
+              <label>Technician Name *</label>
+              <input type="text" id="gen-tech" required placeholder="Ahmed Khan" />
+            </div>
+            <div class="form-group">
+              <label>Output Format</label>
+              <select id="gen-format">
+                <option value="pdf">PDF (Recommended)</option>
+                <option value="docx">DOCX (Word)</option>
+                <option value="xlsx">XLSX (Excel)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Storage Target</label>
+              <select id="gen-storage">
+                <option value="">Default</option>
+                <option value="local">Local</option>
+                <option value="azure">Azure Blob</option>
+                <option value="ftp">FTP</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top:12px">
+            <label>Notes (optional)</label>
+            <textarea id="gen-notes" rows="2" placeholder="Any notes for this PM run..."></textarea>
+          </div>
+          <div style="margin-top:20px;display:flex;gap:10px">
+            <button type="submit" class="btn btn-primary" id="genBtn">
+              ⚙️ Generate PM Document
+            </button>
+            <button type="button" class="btn btn-outline" onclick="previewTasks()">
+              👁 Preview Tasks
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Result card -->
+      <div class="card" id="genResult" style="display:none;max-width:640px">
+        <div class="alert alert-success" id="genSuccess"></div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
+          <a id="genDownloadLink" class="btn btn-success" target="_blank">⬇ Download PDF</a>
+          <button class="btn btn-outline" onclick="showPage('history')">View in History</button>
+        </div>
+        <div style="margin-top:16px;font-size:12px;color:var(--grey-500)">
+          <span>File: </span><code id="genFileName"></code><br/>
+          <span>Hash: </span><code id="genHash"></code>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── HISTORY PAGE ── -->
+    <div class="page" id="page-history">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">PM History</h3>
+          <div style="display:flex;gap:8px">
+            <select id="histFilter" onchange="loadHistory()" style="font-size:13px;padding:6px 10px;border:1.5px solid var(--grey-300);border-radius:6px">
+              <option value="">All Machines</option>
+            </select>
+            <button class="btn btn-outline btn-sm" onclick="loadHistory()">Filter</button>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th><th>Machine</th><th>Interval</th><th>Work Order</th>
+                <th>Technician</th><th>Status</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody">
+              <tr><td colspan="7"><div class="empty-state"><div class="empty-icon">🕐</div><p>Loading history...</p></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="histPagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:13px">
+          <span id="histCount"></span>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-outline btn-sm" id="histPrev" onclick="histPage(-1)" disabled>← Prev</button>
+            <button class="btn btn-outline btn-sm" id="histNext" onclick="histPage(1)">Next →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── LIBRARY PAGE ── -->
+    <div class="page" id="page-library">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">PM Library — Tasks by Machine &amp; Interval</h3>
+        </div>
+        <div id="libraryContent">
+          <div class="empty-state"><div class="spinner"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── MACHINES PAGE ── -->
+    <div class="page" id="page-machines">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Registered Machines</h3>
+          <button class="btn btn-primary btn-sm" id="addMachineBtn" onclick="openAddMachineModal()">＋ Add Machine</button>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Machine ID</th><th>Name</th><th>Manufacturer</th><th>Model</th><th>Type</th><th>Location</th><th>Status</th></tr></thead>
+            <tbody id="machinesBody">
+              <tr><td colspan="7"><div class="empty-state"><div class="spinner"></div></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── UPLOAD PAGE ── -->
+    <div class="page" id="page-upload">
+      <div class="card" style="max-width:600px">
+        <div class="card-header">
+          <h3 class="card-title">Upload Machine Manual (RAG Pipeline)</h3>
+        </div>
+        <div class="alert alert-info">
+          <strong>How it works:</strong> Upload a PDF manual → AI classifies manufacturer →
+          finds maintenance chapter → chunks text → embeds → retrieves top 10 chunks →
+          extracts tasks → engineer reviews → approved tasks added to PM Library.
+        </div>
+        <form id="uploadForm" onsubmit="submitUpload(event)">
+          <div class="form-grid">
+            <div class="form-group" style="grid-column:1/-1">
+              <label>PDF Manual *</label>
+              <input type="file" id="upload-file" accept=".pdf" required />
+              <span class="hint">Max 50MB · PDF only</span>
+            </div>
+            <div class="form-group">
+              <label>Machine ID (optional)</label>
+              <select id="upload-machine">
+                <option value="">Auto-detect from PDF</option>
+              </select>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary" style="margin-top:16px" id="uploadBtn">
+            ⬆️ Upload &amp; Process
+          </button>
+        </form>
+        <div id="uploadAlert" style="margin-top:16px"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Upload Queue</h3>
+          <button class="btn btn-outline btn-sm" onclick="loadUploads()">↻ Refresh</button>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Filename</th><th>Machine</th><th>Status</th><th>Manufacturer</th><th>Tasks</th><th>Uploaded By</th><th>Action</th></tr></thead>
+            <tbody id="uploadQueueBody">
+              <tr><td colspan="7"><div class="empty-state"><p>No uploads yet</p></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── EXPORT PAGE (Manager) ── -->
+    <div class="page" id="page-export">
+      <div class="card" style="max-width:640px">
+        <div class="card-header"><h3 class="card-title">Export Data — Manager Access</h3></div>
+        <div class="alert alert-info"><strong>Architecture:</strong> Manager role — Full read + export access. All exports are GMP audit logged.</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div class="card" style="padding:16px">
+            <h4 style="margin:0 0 8px;color:var(--navy)">PM History Export (CSV)</h4>
+            <p style="font-size:13px;color:var(--grey-700);margin:0 0 12px">Export full PM generation history with file hashes, technician names and approval status.</p>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <select id="export-machine" style="padding:8px 12px;border:1.5px solid var(--grey-300);border-radius:6px;font-size:13px">
+                <option value="">All Machines</option>
+              </select>
+              <button class="btn btn-primary" onclick="exportHistory()">⬇ Export History CSV</button>
+            </div>
+          </div>
+          <div class="card" style="padding:16px">
+            <h4 style="margin:0 0 8px;color:var(--navy)">PM Library Export (CSV)</h4>
+            <p style="font-size:13px;color:var(--grey-700);margin:0 0 12px">Export all 146 tasks with source chapter references for compliance verification.</p>
+            <button class="btn btn-success" onclick="exportLibrary()">⬇ Export Full Library CSV</button>
+          </div>
+          <div class="card" style="padding:16px">
+            <h4 style="margin:0 0 8px;color:var(--navy)">Audit Log Export (CSV)</h4>
+            <p style="font-size:13px;color:var(--grey-700);margin:0 0 12px">Export immutable GMP audit log — who, when, what. Retained per GMP compliance requirements.</p>
+            <button class="btn btn-warning" onclick="exportAuditLog()">⬇ Export Audit Log CSV</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── FILL CHECKLIST PAGE (Technician) ── -->
+    <div class="page" id="page-checklist">
+      <div class="card" style="max-width:800px">
+        <div class="card-header"><h3 class="card-title">Fill PM Checklist — Technician</h3></div>
+        <div class="alert alert-info">
+          <strong>Technician workflow:</strong> Select a recent PM record, initial each task as you complete it, then submit. Architecture: Technician → Fill Checklist → Read/Write/submit only.
+        </div>
+        <div style="display:flex;gap:10px;margin-bottom:16px">
+          <input type="text" id="cl-record-id" placeholder="Paste PM Record ID..." style="flex:1;padding:10px 12px;border:1.5px solid var(--grey-300);border-radius:6px;font-size:14px" />
+          <button class="btn btn-primary" onclick="loadChecklist()">Load</button>
+        </div>
+        <div id="checklistContent">
+          <div class="empty-state"><div class="empty-icon">✅</div><p>Enter a PM Record ID above or select one from PM History</p></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ── Task Preview Modal ── -->
+<div class="modal-overlay" id="taskPreviewModal">
+  <div class="modal" style="max-width:800px">
+    <div class="modal-header">
+      <h3 class="modal-title" id="taskPreviewTitle">Task Preview</h3>
+      <button class="modal-close" onclick="closeModal('taskPreviewModal')">×</button>
+    </div>
+    <div id="taskPreviewBody"></div>
+  </div>
+</div>
+
+<!-- ── Add Machine Modal ── -->
+<div class="modal-overlay" id="addMachineModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 class="modal-title">Add New Machine</h3>
+      <button class="modal-close" onclick="closeModal('addMachineModal')">×</button>
+    </div>
+    <form onsubmit="submitNewMachine(event)">
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Machine ID *</label>
+          <input type="text" id="new-machine-id" required placeholder="MACHINE-ID-L3" pattern="[A-Z0-9_\-]+" />
+          <span class="hint">Uppercase letters, numbers, hyphens only</span>
+        </div>
+        <div class="form-group">
+          <label>Name *</label>
+          <input type="text" id="new-machine-name" required />
+        </div>
+        <div class="form-group">
+          <label>Manufacturer *</label>
+          <input type="text" id="new-machine-mfr" required />
+        </div>
+        <div class="form-group">
+          <label>Model *</label>
+          <input type="text" id="new-machine-model" required />
+        </div>
+        <div class="form-group">
+          <label>Type *</label>
+          <select id="new-machine-type">
+            <option value="KRONES">KRONES</option>
+            <option value="THIRD_PARTY">THIRD PARTY</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Location</label>
+          <input type="text" id="new-machine-loc" placeholder="Line 3" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal('addMachineModal')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Machine</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── Loading Overlay ── -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner" style="width:40px;height:40px;border-width:3px"></div>
+  <div class="loading-text" id="loadingText">Generating PM document...</div>
+</div>
+
+<script src="/frontend/static/js/app.js"></script>
+</body>
+</html>

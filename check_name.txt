@@ -1,0 +1,2 @@
+name=eisbär Dehumidifier DAS-E8K.2
+mfr=eisbär Trockentechnik GmbH

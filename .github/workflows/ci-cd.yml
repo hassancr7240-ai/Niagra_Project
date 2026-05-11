@@ -1,0 +1,175 @@
+name: PM Automation — CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+  AZURE_WEBAPP_NAME: pm-automation-api
+
+jobs:
+  # ── Security Scan (Bandit) ──────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit security scan
+        run: |
+          bandit -r app/ \
+            -x app/tests \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json \
+            -o bandit-report.json || true
+          bandit -r app/ \
+            -x app/tests \
+            --severity-level high \
+            --confidence-level high
+        # High-severity issues fail the build; medium issues are reported only
+
+      - name: Upload Bandit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+
+  # ── Test ────────────────────────────────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install aiosqlite
+
+      - name: Create test directories
+        run: mkdir -p data output/pm-docs
+
+      - name: Run tests with coverage
+        env:
+          APP_ENV: development
+          DATABASE_URL: ""
+          DEV_API_KEY: dev-secret-key-change-in-prod
+          DEFAULT_STORAGE_TARGET: local
+          LOCAL_STORAGE_PATH: ./output/pm-docs
+        run: |
+          pytest tests/ \
+            -v \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --asyncio-mode=auto \
+            -x
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ── Build Docker image ──────────────────────────────────────────────────────
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/pm-automation:latest
+            ${{ secrets.ACR_LOGIN_SERVER }}/pm-automation:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Deploy to Azure App Service ─────────────────────────────────────────────
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Web App (az webapp up)
+        run: |
+          az webapp config container set \
+            --name ${{ env.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --docker-custom-image-name ${{ secrets.ACR_LOGIN_SERVER }}/pm-automation:${{ github.sha }} \
+            --docker-registry-server-url https://${{ secrets.ACR_LOGIN_SERVER }}
+
+      - name: Set Key Vault secrets reference
+        run: |
+          az webapp config appsettings set \
+            --name ${{ env.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --settings \
+              APP_ENV=production \
+              AZURE_KEY_VAULT_URL=${{ secrets.AZURE_KEY_VAULT_URL }}
+
+      - name: Verify deployment
+        run: |
+          sleep 30
+          az webapp show \
+            --name ${{ env.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --query "state" -o tsv
+
+  # ── Post-deploy: Test Endpoints ─────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test (Production)
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Health check
+        run: |
+          curl -f https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/health || exit 1
+          echo "✅ Health check passed"

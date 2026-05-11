@@ -1,0 +1,50 @@
+version: '3.9'
+
+services:
+  pm-automation-api:
+    build:
+      context: .
+      args:
+        APP_ENV: development
+    container_name: pm-automation-api
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: development
+      APP_DEBUG: "false"
+      APP_SECRET_KEY: dev-secret-key-docker-32chars!!
+      PYTHONIOENCODING: utf-8
+      # Database — SQLite stored in /app/data (mounted volume below)
+      DATABASE_URL: ""
+      # Storage — local inside container
+      DEFAULT_STORAGE_TARGET: local
+      LOCAL_STORAGE_PATH: /app/output/pm-docs
+      # Dev auth key
+      DEV_API_KEY: dev-secret-key-change-in-prod
+      # AI provider (set to watsonx and add keys to use IBM watsonx.ai)
+      AI_PROVIDER: openai
+      # Optional — fill in your keys:
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      WATSONX_API_KEY: "${WATSONX_API_KEY:-}"
+      WATSONX_PROJECT_ID: "${WATSONX_PROJECT_ID:-}"
+      AZURE_AD_TENANT_ID: "${AZURE_AD_TENANT_ID:-}"
+      AZURE_AD_CLIENT_ID: "${AZURE_AD_CLIENT_ID:-}"
+      AZURE_STORAGE_CONNECTION_STRING: "${AZURE_STORAGE_CONNECTION_STRING:-}"
+    volumes:
+      # Persist the SQLite database across container restarts
+      - pm-data:/app/data
+      # Persist generated PM documents
+      - pm-output:/app/output
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  pm-data:
+    driver: local
+  pm-output:
+    driver: local

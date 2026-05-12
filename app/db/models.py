@@ -203,3 +203,32 @@ class MachineHours(Base):
     current_hours: Mapped[int] = mapped_column(Integer)
     recorded_by: Mapped[Optional[str]] = mapped_column(String(128))
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(128))
+    machine_id: Mapped[Optional[str]] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(128), default="New Chat")
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    messages: Mapped[list[ChatMessage]] = relationship("ChatMessage", back_populates="session")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(64), ForeignKey("chat_sessions.session_id"))
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    has_checklist: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    session: Mapped[ChatSession] = relationship("ChatSession", back_populates="messages")

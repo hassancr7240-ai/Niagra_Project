@@ -93,6 +93,7 @@ function showPage(name) {
     upload: 'Upload Manual',
     export: 'Export Data',
     checklist: 'Fill PM Checklist',
+    chat: 'PM Chat Assistant',
   };
   document.getElementById('pageTitle').textContent = titles[name] || name;
 
@@ -101,6 +102,7 @@ function showPage(name) {
   if (name === 'library') loadLibrary();
   if (name === 'machines') loadMachines();
   if (name === 'upload') loadUploads();
+  if (name === 'chat') initChat();
 }
 
 // ─── API helper ───────────────────────────────────────────────────────────────
@@ -824,3 +826,296 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
     if (e.target === overlay) overlay.classList.remove('open');
   });
 });
+
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+
+let _chatSessionId = null;
+let _chatSending = false;
+
+async function initChat() {
+  // Populate machine filter from existing select
+  const machineFilter = document.getElementById('chat-machine-filter');
+  if (machineFilter && machineFilter.options.length === 1) {
+    const genSel = document.getElementById('gen-machine');
+    if (genSel) {
+      Array.from(genSel.options).slice(1).forEach(opt => {
+        machineFilter.appendChild(opt.cloneNode(true));
+      });
+    }
+  }
+  // Check if AI is configured
+  try {
+    const status = await api('/api/chat/status');
+    if (status && !status.ai_ready) {
+      const warning = document.getElementById('chatApiWarning');
+      if (warning) {
+        const provider = status.ai_provider === 'watsonx' ? 'WATSONX_API_KEY + WATSONX_PROJECT_ID' : 'OPENAI_API_KEY';
+        warning.innerHTML = `⚠️ AI not configured — set <code>${provider}</code> in <code>.env</code> and restart the server to enable AI responses.`;
+        warning.style.display = 'block';
+      }
+    }
+  } catch(e) {}
+  await loadChatSessions();
+}
+
+async function loadChatSessions() {
+  const list = document.getElementById('chatSessionList');
+  try {
+    const sessions = await api('/api/chat/sessions');
+    if (!sessions || sessions.length === 0) {
+      list.innerHTML = '<div style="padding:20px 12px;font-size:12px;color:var(--grey-500);text-align:center">No conversations yet.<br/>Click + New to start.</div>';
+      return;
+    }
+    list.innerHTML = sessions.map(s => `
+      <div class="chat-session-item ${_chatSessionId === s.session_id ? 'active' : ''}"
+           onclick="loadSession('${s.session_id}', ${JSON.stringify(s.title).replace(/"/g, '&quot;')}, '${s.machine_id || ''}')">
+        <div class="chat-session-title">${escapeHtml(s.title)}</div>
+        <div class="chat-session-meta">
+          ${s.machine_id ? `<span class="badge badge-grey" style="font-size:9px">${s.machine_id}</span>` : ''}
+          <span style="font-size:10px;color:var(--grey-500)">${s.message_count} msgs</span>
+        </div>
+        <button class="chat-session-delete" onclick="deleteSession(event,'${s.session_id}')">×</button>
+      </div>`).join('');
+  } catch(e) {
+    list.innerHTML = `<div class="alert alert-danger" style="margin:8px;font-size:12px">${e.message}</div>`;
+  }
+}
+
+async function newChatSession() {
+  const machineId = document.getElementById('chat-machine-filter')?.value || null;
+  try {
+    const session = await api('/api/chat/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ machine_id: machineId || null, title: 'New Chat' }),
+    });
+    if (!session) return;
+    _chatSessionId = session.session_id;
+    document.getElementById('chatTitle').textContent = 'New Chat';
+    document.getElementById('chatSubtitle').textContent = machineId ? `Machine: ${machineId}` : 'Ask anything about preventive maintenance';
+    clearChatMessages();
+    await loadChatSessions();
+  } catch(e) {
+    alert('Failed to create session: ' + e.message);
+  }
+}
+
+async function loadSession(sessionId, title, machineId) {
+  _chatSessionId = sessionId;
+  document.getElementById('chatTitle').textContent = title;
+  document.getElementById('chatSubtitle').textContent = machineId ? `Machine: ${machineId}` : 'Multi-turn conversation';
+  clearChatMessages();
+
+  try {
+    const messages = await api(`/api/chat/sessions/${sessionId}/messages`);
+    if (!messages || messages.length === 0) return;
+
+    const welcome = document.getElementById('chatWelcome');
+    if (welcome) welcome.style.display = 'none';
+
+    messages.forEach(m => appendMessage(m.role, m.content, m.has_checklist));
+    scrollChatToBottom();
+  } catch(e) {
+    appendMessage('assistant', `Error loading session: ${e.message}`, false);
+  }
+  await loadChatSessions();
+}
+
+async function deleteSession(e, sessionId) {
+  e.stopPropagation();
+  if (!confirm('Delete this conversation?')) return;
+  try {
+    await api(`/api/chat/sessions/${sessionId}`, { method: 'DELETE' });
+    if (_chatSessionId === sessionId) {
+      _chatSessionId = null;
+      clearChatMessages();
+      document.getElementById('chatTitle').textContent = 'PM Assistant';
+    }
+    await loadChatSessions();
+  } catch(ex) {
+    alert('Delete failed: ' + ex.message);
+  }
+}
+
+async function sendChatMessage() {
+  if (_chatSending) return;
+  const input = document.getElementById('chatInput');
+  const message = input.value.trim();
+  if (!message) return;
+
+  // Create session on first message if none exists
+  if (!_chatSessionId) {
+    const machineId = document.getElementById('chat-machine-filter')?.value || null;
+    try {
+      const session = await api('/api/chat/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ machine_id: machineId || null, title: message.slice(0, 60) }),
+      });
+      if (!session) return;
+      _chatSessionId = session.session_id;
+    } catch(e) {
+      alert('Could not start session: ' + e.message);
+      return;
+    }
+  }
+
+  const welcome = document.getElementById('chatWelcome');
+  if (welcome) welcome.style.display = 'none';
+
+  appendMessage('user', message, false);
+  input.value = '';
+  input.style.height = 'auto';
+  scrollChatToBottom();
+
+  _chatSending = true;
+  document.getElementById('chatSendBtn').disabled = true;
+  document.getElementById('chatTyping').style.display = 'flex';
+
+  const machineId = document.getElementById('chat-machine-filter')?.value || null;
+
+  try {
+    const resp = await api(`/api/chat/sessions/${_chatSessionId}/message`, {
+      method: 'POST',
+      body: JSON.stringify({ message, machine_id: machineId || null }),
+    });
+    if (resp) {
+      appendMessage('assistant', resp.content, resp.has_checklist);
+      if (resp.rag_used) {
+        document.getElementById('chatRagBadge').style.display = 'inline-block';
+      }
+      await loadChatSessions();
+    }
+  } catch(e) {
+    appendMessage('assistant', `Error: ${e.message}`, false);
+  } finally {
+    _chatSending = false;
+    document.getElementById('chatSendBtn').disabled = false;
+    document.getElementById('chatTyping').style.display = 'none';
+    scrollChatToBottom();
+  }
+}
+
+function sendSuggestion(text) {
+  const input = document.getElementById('chatInput');
+  input.value = text;
+  sendChatMessage();
+}
+
+function appendMessage(role, content, hasChecklist) {
+  const container = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = `chat-message ${role === 'user' ? 'chat-message-user' : 'chat-message-assistant'}`;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble';
+  bubble.innerHTML = renderMarkdown(content);
+
+  div.appendChild(bubble);
+
+  if (role === 'assistant' && hasChecklist) {
+    const actions = document.createElement('div');
+    actions.className = 'chat-message-actions';
+    actions.innerHTML = `
+      <button class="btn btn-outline btn-sm" onclick="copyChecklistText(this)">📋 Copy Checklist</button>
+      <button class="btn btn-success btn-sm" onclick="downloadChecklist(this)">⬇ Download as PDF</button>
+    `;
+    actions.dataset.content = content;
+    div.appendChild(actions);
+  }
+
+  container.appendChild(div);
+}
+
+function clearChatMessages() {
+  const container = document.getElementById('chatMessages');
+  container.innerHTML = `
+    <div class="chat-welcome" id="chatWelcome">
+      <div style="font-size:32px;margin-bottom:12px">💬</div>
+      <h3 style="margin:0 0 8px;color:var(--navy)">PM Maintenance Assistant</h3>
+      <p style="color:var(--grey-500);font-size:13px;max-width:400px;margin:0 auto 20px">
+        Ask about maintenance procedures, generate checklists, check safety requirements, or get PM schedule advice.
+      </p>
+      <div class="chat-suggestions">
+        <button class="chat-suggestion" onclick="sendSuggestion('Generate a 500hr PM checklist for VARIOPAC-PRO-L3')">Generate 500hr PM checklist for VARIOPAC-PRO-L3</button>
+        <button class="chat-suggestion" onclick="sendSuggestion('What LOTO steps are required before servicing the CONTIFORM-C3-L3?')">LOTO steps for CONTIFORM-C3-L3</button>
+        <button class="chat-suggestion" onclick="sendSuggestion('What maintenance tasks are overdue on Line 3?')">What PMs are overdue?</button>
+        <button class="chat-suggestion" onclick="sendSuggestion('List all lubrication tasks for Krones machines at 1500hr interval')">Lubrication tasks at 1500hr</button>
+      </div>
+    </div>`;
+  document.getElementById('chatRagBadge').style.display = 'none';
+}
+
+function clearChat() {
+  _chatSessionId = null;
+  clearChatMessages();
+  document.getElementById('chatTitle').textContent = 'PM Assistant';
+  document.getElementById('chatSubtitle').textContent = 'Ask anything about preventive maintenance';
+}
+
+function scrollChatToBottom() {
+  const c = document.getElementById('chatMessages');
+  if (c) c.scrollTop = c.scrollHeight;
+}
+
+function chatKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+}
+
+function autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function copyChecklistText(btn) {
+  const content = btn.closest('.chat-message-actions').dataset.content;
+  navigator.clipboard.writeText(content).then(() => {
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.textContent = '📋 Copy Checklist'; }, 2000);
+  });
+}
+
+function downloadChecklist(btn) {
+  const content = btn.closest('.chat-message-actions').dataset.content;
+  const blob = new Blob([content], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `pm-checklist-${new Date().toISOString().slice(0,10)}.txt`;
+  a.click();
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Code blocks
+    .replace(/```[\s\S]*?```/g, m => `<pre><code>${m.slice(3, -3).replace(/^[^\n]*\n?/, '')}</code></pre>`)
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Bold
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    // Headings
+    .replace(/^#{1,3}\s+(.+)$/gm, (_, h) => `<strong style="display:block;margin:10px 0 4px;color:var(--navy)">${h}</strong>`)
+    // Numbered lists
+    .replace(/^(\d+)\.\s+(.+)$/gm, (_, n, item) => {
+      const safety = item.includes('⚠') ? ' style="background:#FFF0F0;border-left:3px solid var(--red);padding-left:8px"' : '';
+      return `<div class="chat-list-item"${safety}><span class="chat-list-num">${n}.</span>${item}</div>`;
+    })
+    // Bullet lists
+    .replace(/^[-*]\s+(.+)$/gm, (_, item) => {
+      const safety = item.includes('⚠') ? ' style="background:#FFF0F0;border-left:3px solid var(--red);padding-left:8px"' : '';
+      return `<div class="chat-list-item"${safety}><span class="chat-list-bullet">•</span>${item}</div>`;
+    })
+    // Horizontal rules
+    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--grey-300);margin:8px 0">')
+    // Paragraphs
+    .replace(/\n\n/g, '<br/><br/>')
+    .replace(/\n/g, '<br/>');
+}

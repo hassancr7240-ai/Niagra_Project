@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     ftp_remote_base_path: str = "/pm-docs"
 
     # ── AI Provider ───────────────────────────────────────────────────────────
-    ai_provider: str = "openai"  # openai | watsonx
+    ai_provider: str = "openai"  # openai | watsonx  — override with AI_PROVIDER=watsonx in .env
     openai_api_key: Optional[str] = None
     openai_model_generation: str = "gpt-4o"
     openai_model_classification: str = "gpt-4o-mini"
@@ -95,6 +95,11 @@ class Settings(BaseSettings):
 
     # ── Dev API Key (when Azure AD tenant is not configured) ──────────────────
     dev_api_key: str = "dev-secret-key-change-in-prod"
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated list of allowed origins in production.
+    # Example: https://pm-automation.azurewebsites.net,https://pm.yourcompany.com
+    allowed_origins: str = ""
 
     # ── Session ───────────────────────────────────────────────────────────────
     session_timeout_minutes: int = 30

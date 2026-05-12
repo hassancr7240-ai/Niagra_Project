@@ -46,15 +46,13 @@ async def _watsonx_analytics(
     """
     Call IBM watsonx.ai granite-13b-instruct-v2 for PM pattern analysis.
     Data Flow Diagram: granite-13b-instruct-v2 → Analyse PM Patterns + Predict Next Due
+    Uses IAM token auth.
     """
     import httpx
+    from app.rag.watsonx_auth import watsonx_headers
 
-    url = f"{settings.watsonx_url}/ml/v1/text/generation"
-    headers = {
-        "Authorization": f"Bearer {settings.watsonx_api_key}",
-        "Content-Type": "application/json",
-        "ML-Instance-ID": settings.watsonx_project_id or "",
-    }
+    url = f"{settings.watsonx_url}/ml/v1/text/generation?version=2024-03-14"
+    headers = await watsonx_headers(settings.watsonx_api_key)
 
     # Summarise recent PM history for analysis
     summary = []

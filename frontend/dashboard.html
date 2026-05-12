@@ -33,6 +33,10 @@
       <a class="nav-item" onclick="showPage('machines')" href="#">
         <span class="icon">🏭</span> Machines
       </a>
+      <div class="nav-section">AI Assistant</div>
+      <a class="nav-item" id="nav-chat" onclick="showPage('chat')" href="#">
+        <span class="icon">💬</span> PM Chat
+      </a>
       <div class="nav-section" id="nav-section-upload">Engineer</div>
       <a class="nav-item" id="nav-upload" onclick="showPage('upload')" href="#">
         <span class="icon">⬆️</span> Upload Manual
@@ -363,6 +367,85 @@
         <div id="checklistContent">
           <div class="empty-state"><div class="empty-icon">✅</div><p>Enter a PM Record ID above or select one from PM History</p></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ── CHAT PAGE ── -->
+    <div class="page" id="page-chat">
+      <div class="chat-layout">
+
+        <!-- Sidebar: sessions -->
+        <div class="chat-sidebar">
+          <div class="chat-sidebar-header">
+            <span style="font-weight:700;font-size:14px">Conversations</span>
+            <button class="btn btn-primary btn-sm" onclick="newChatSession()">＋ New</button>
+          </div>
+          <div class="chat-machine-filter">
+            <select id="chat-machine-filter" style="width:100%;padding:7px 10px;border:1.5px solid var(--grey-300);border-radius:6px;font-size:12px">
+              <option value="">All Machines</option>
+            </select>
+          </div>
+          <div id="chatSessionList" class="chat-session-list">
+            <div class="empty-state" style="padding:20px 12px;font-size:12px">No conversations yet</div>
+          </div>
+        </div>
+
+        <!-- Main chat area -->
+        <div class="chat-main">
+          <div class="chat-header">
+            <div>
+              <div id="chatTitle" style="font-weight:700;font-size:15px">PM Assistant</div>
+              <div id="chatSubtitle" style="font-size:11px;color:var(--grey-500)">Ask anything about preventive maintenance</div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span id="chatRagBadge" class="badge badge-blue" style="display:none;font-size:10px">RAG ON</span>
+              <button class="btn btn-outline btn-sm" onclick="clearChat()">Clear</button>
+            </div>
+          </div>
+          <div id="chatApiWarning" style="display:none;background:#FFF3CD;border-bottom:1px solid #FFD700;padding:8px 20px;font-size:12px;color:#856404">
+            ⚠️ No AI API key configured — set <code>OPENAI_API_KEY</code> in <code>.env</code> and restart the server to enable AI responses.
+          </div>
+
+          <div class="chat-messages" id="chatMessages">
+            <div class="chat-welcome" id="chatWelcome">
+              <div style="font-size:32px;margin-bottom:12px">💬</div>
+              <h3 style="margin:0 0 8px;color:var(--navy)">PM Maintenance Assistant</h3>
+              <p style="color:var(--grey-500);font-size:13px;max-width:400px;margin:0 auto 20px">
+                Ask about maintenance procedures, generate checklists, check safety requirements, or get PM schedule advice.
+              </p>
+              <div class="chat-suggestions">
+                <button class="chat-suggestion" onclick="sendSuggestion('Generate a 500hr PM checklist for VARIOPAC-PRO-L3')">Generate 500hr PM checklist for VARIOPAC-PRO-L3</button>
+                <button class="chat-suggestion" onclick="sendSuggestion('What LOTO steps are required before servicing the CONTIFORM-C3-L3?')">LOTO steps for CONTIFORM-C3-L3</button>
+                <button class="chat-suggestion" onclick="sendSuggestion('What maintenance tasks are overdue on Line 3?')">What PMs are overdue?</button>
+                <button class="chat-suggestion" onclick="sendSuggestion('List all lubrication tasks for Krones machines at 1500hr interval')">Lubrication tasks at 1500hr</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="chat-input-area">
+            <div id="chatTyping" class="chat-typing" style="display:none">
+              <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
+              <span style="font-size:12px;color:var(--grey-500);margin-left:6px">AI is thinking...</span>
+            </div>
+            <div class="chat-input-row">
+              <textarea
+                id="chatInput"
+                class="chat-textarea"
+                placeholder="Ask about maintenance procedures, generate a checklist, check safety steps..."
+                rows="1"
+                onkeydown="chatKeyDown(event)"
+                oninput="autoResizeTextarea(this)"
+              ></textarea>
+              <button class="btn btn-primary chat-send-btn" id="chatSendBtn" onclick="sendChatMessage()">
+                &#10148; Send
+              </button>
+            </div>
+            <div style="font-size:11px;color:var(--grey-500);margin-top:6px;padding:0 4px">
+              Enter to send &middot; Shift+Enter for new line &middot; Say "generate checklist" for formatted output
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
 

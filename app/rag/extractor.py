@@ -106,13 +106,18 @@ async def _extract_watsonx(
     model: Optional[str],
     interval_hints: Optional[list[int]],
 ) -> list[dict]:
+    """
+    IBM watsonx.ai granite-3b-code-instruct task extraction.
+    Uses IAM token auth. Model is optimised for structured JSON output.
+    """
     import httpx
+    from app.rag.watsonx_auth import watsonx_headers
 
-    url = f"{settings.watsonx_url}/ml/v1/text/generation"
-    headers = {
-        "Authorization": f"Bearer {settings.watsonx_api_key}",
-        "Content-Type": "application/json",
-    }
+    if not settings.watsonx_api_key:
+        logger.error("WATSONX_API_KEY not set")
+        return []
+
+    url = f"{settings.watsonx_url}/ml/v1/text/generation?version=2024-03-14"
     prompt = f"""{_SYSTEM_PROMPT}
 
 Machine: {manufacturer} {model or ''}
@@ -127,9 +132,14 @@ Return JSON array of tasks:"""
         "model_id": settings.watsonx_model_generation,
         "project_id": settings.watsonx_project_id,
         "input": prompt,
-        "parameters": {"max_new_tokens": 3000, "temperature": 0},
+        "parameters": {
+            "max_new_tokens": 3000,
+            "temperature": 0,
+            "repetition_penalty": 1.1,
+        },
     }
     try:
+        headers = await watsonx_headers(settings.watsonx_api_key)
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()

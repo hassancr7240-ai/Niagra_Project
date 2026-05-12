@@ -11,7 +11,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import download, generate, history, library, machines, manual, checklist, export
+from app.api.routes import download, generate, history, library, machines, manual, checklist, export, chat
 from app.config import get_settings
 from app.core.app_insights import RequestLoggingMiddleware, init_app_insights
 from app.core.key_vault import load_secrets_from_key_vault
@@ -78,18 +78,36 @@ app = FastAPI(
 )
 
 # ── Middleware ─────────────────────────────────────────────────────────────────
+_cors_origins: list[str]
+if settings.is_dev:
+    _cors_origins = ["*"]
+elif settings.allowed_origins:
+    _cors_origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+else:
+    _cors_origins = ["https://pm-automation-api.azurewebsites.net"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.is_dev else ["https://your-app.azurewebsites.net"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 if not settings.is_dev:
+    _trusted_hosts = ["*.azurewebsites.net", "*.azure.com", "localhost"]
+    if settings.allowed_origins:
+        from urllib.parse import urlparse
+        for origin in _cors_origins:
+            try:
+                host = urlparse(origin).hostname
+                if host and host not in _trusted_hosts:
+                    _trusted_hosts.append(host)
+            except Exception:
+                pass
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["*.azurewebsites.net", "*.azure.com", "localhost"],
+        allowed_hosts=_trusted_hosts,
     )
 
 
@@ -170,6 +188,7 @@ app.include_router(manual.router)
 app.include_router(download.router)
 app.include_router(checklist.router)
 app.include_router(export.router)
+app.include_router(chat.router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

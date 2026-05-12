@@ -155,8 +155,10 @@ def _upload_local(
     if local_file != dest:
         shutil.copy2(str(local_file), str(dest))
 
-    rel = dest.relative_to(Path(".").resolve()) if dest.is_relative_to(Path(".").resolve()) else dest
-    url = f"/api/download/{machine_id}/{dest.parent.name}/{dest.parent.parent.name}/{file_name}"
+    # Path structure: output/pm-docs/<machine>/<year>/<month>/<file>
+    month = dest.parent.name        # e.g. "05"
+    year = dest.parent.parent.name  # e.g. "2026"
+    url = f"/api/download/{machine_id}/{year}/{month}/{file_name}"
     logger.info("Stored locally: %s", dest)
     return "local", url
 

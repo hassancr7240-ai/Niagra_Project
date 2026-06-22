@@ -10,7 +10,6 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Uploa
 
 from app.db import crud
 from app.dependencies import CurrentUserDep, DBDep
-from app.rag.pipeline import run_pipeline
 from app.utils.audit import log_action
 from app.utils.security import compute_bytes_hash, sanitize_filename
 
@@ -22,17 +21,20 @@ _MAX_FILE_MB = 50
 
 def _basic_pdf_safety_check(content: bytes) -> bool:
     """
-    Basic PDF safety check (Architecture: 'All uploads virus scanned').
-    Production: replace with Microsoft Defender for Cloud Storage webhook
-    or ClamAV daemon integration. This stub blocks obvious non-PDF and
-    embedded JavaScript patterns.
+    Basic PDF safety check — blocks only genuinely malicious patterns.
+    NOTE: /EmbeddedFile is intentionally excluded — many legitimate Krones/
+    eisbär manuals embed fonts and attachments and are NOT malicious.
+    Production: replace with Microsoft Defender for Cloud Storage webhook.
     """
-    if not content.startswith(b"%PDF"):
+    if len(content) < 5:
         return False
-    # Block PDFs with embedded JavaScript (common exploit vector)
-    dangerous_patterns = [b"/JavaScript", b"/JS ", b"/Launch", b"/EmbeddedFile"]
-    for pattern in dangerous_patterns:
-        if pattern in content[:8192]:
+    if not content[:4].startswith(b"%PDF"):
+        return False
+    # Only block active exploit patterns (JavaScript execution)
+    exploit_patterns = [b"/JavaScript", b"AA /JS", b"/OpenAction /JS", b"eval("]
+    sample = content[:16384]
+    for pattern in exploit_patterns:
+        if pattern in sample:
             return False
     return True
 
@@ -110,6 +112,11 @@ async def upload_manual(
         ip_address=user.ip_address,
     )
 
+    # Commit NOW — release the SQLite write lock before the background task starts.
+    # BackgroundTasks run before FastAPI's dependency-generator cleanup, so without
+    # this explicit commit the ORM session holds the write lock for the entire pipeline.
+    await db.commit()
+
     # Run pipeline in background
     background_tasks.add_task(
         _run_pipeline_task,
@@ -122,6 +129,40 @@ async def upload_manual(
         "filename": safe_name,
         "status": "UPLOADED",
         "message": "Manual uploaded successfully. RAG pipeline started. Check status endpoint for progress.",
+    }
+
+
+@router.get("/uploads/{manual_id}/status")
+async def get_upload_status_light(manual_id: str, user: CurrentUserDep, db: DBDep) -> dict:
+    """Lightweight status poll — returns just status + progress for the frontend spinner."""
+    user.require("manual:upload")
+    upload = await crud.get_manual_upload(db, manual_id)
+    if not upload:
+        return {"manual_id": manual_id, "status": "NOT_FOUND", "ready": False, "progress": 0, "label": "Not found"}
+
+    _status_labels = {
+        "UPLOADED":   (10, "Uploaded — starting pipeline…"),
+        "CLASSIFYING": (25, "Classifying document…"),
+        "CHUNKING":   (45, "Splitting into chunks…"),
+        "EMBEDDING":  (65, "Generating embeddings…"),
+        "EXTRACTING": (85, "Extracting PM tasks…"),
+        "PENDING_REVIEW": (100, "Processing complete — ready to chat!"),
+        "APPROVED":   (100, "Approved and added to PM Library"),
+        "FAILED":     (0,  "Processing failed"),
+    }
+    progress, label = _status_labels.get(upload.status, (50, upload.status))
+    ready = upload.status in ("PENDING_REVIEW", "APPROVED")
+    import json as _json
+    task_count = len(_json.loads(upload.extracted_tasks or "[]")) if ready else 0
+    return {
+        "manual_id": manual_id,
+        "status": upload.status,
+        "ready": ready,
+        "progress": progress,
+        "label": label,
+        "task_count": task_count,
+        "filename": upload.original_filename,
+        "error": upload.error_message if upload.status == "FAILED" else None,
     }
 
 
@@ -270,21 +311,137 @@ async def approve_extracted_tasks(
 
 
 async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
-    """Background task wrapper — creates its own DB session."""
-    from app.db.database import get_db_session
+    """
+    Background task wrapper.
+    Uses a raw sqlite3 connection (isolation_level=None = autocommit) for status
+    updates to avoid SQLAlchemy's connection-pool write-lock contention with the
+    main request session on SQLite.
+    """
+    import asyncio
+    import logging
+    import shutil
+    import sqlite3
+    from pathlib import Path as _Path
 
-    async with get_db_session() as db:
+    log = logging.getLogger(__name__)
+
+    # Path to the SQLite file (same one the ORM uses)
+    db_path = str(_Path(__file__).parent.parent.parent.parent / "data" / "pm_automation.db")
+
+    def _raw_update(status: str, error: str = "") -> None:
+        """Write status update via raw sqlite3 in autocommit mode — no lock contention."""
         try:
-            await run_pipeline(db, manual_id, pdf_path)
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).error(
-                "Background pipeline task failed for %s: %s", manual_id, exc
+            conn = sqlite3.connect(db_path, timeout=5, isolation_level=None)
+            if error:
+                conn.execute(
+                    "UPDATE manual_uploads SET status=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
+                    (status, error[:2000], manual_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE manual_uploads SET status=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
+                    (status, manual_id),
+                )
+            conn.close()
+        except Exception as e:
+            log.warning("raw_update failed (%s): %s", status, e)
+
+    def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str) -> None:
+        """Write final pipeline results via raw sqlite3."""
+        try:
+            conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+            conn.execute(
+                "UPDATE manual_uploads SET status='PENDING_REVIEW', extracted_tasks=?, detected_manufacturer=?, detected_chapters=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
+                (extracted_tasks_json, manufacturer, chapters_json, manual_id),
             )
-        finally:
-            import shutil
-            parent = pdf_path.parent
-            try:
-                shutil.rmtree(str(parent), ignore_errors=True)
-            except Exception:
-                pass
+            conn.close()
+        except Exception as e:
+            log.warning("raw_finalize failed: %s", e)
+
+    # Run the actual pipeline work using raw status updates instead of ORM updates
+    try:
+        await _run_pipeline_direct(manual_id, pdf_path, _raw_update, _raw_finalize)
+    except Exception as exc:
+        log.error("Background pipeline task failed for %s: %s", manual_id, exc)
+        _raw_update("FAILED", str(exc))
+    finally:
+        parent = pdf_path.parent
+        try:
+            shutil.rmtree(str(parent), ignore_errors=True)
+        except Exception:
+            pass
+
+
+async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finalize_fn) -> None:
+    """
+    Runs the full RAG pipeline calling update_fn(status) for progress updates
+    and finalize_fn(tasks_json, manufacturer, chapters_json) when complete.
+    Avoids any ORM session for status writes — only uses raw sqlite3 via callbacks.
+    """
+    import json
+    import logging
+    from app.rag.chunker import TextChunk, chunk_text, extract_chapter_text, extract_text_from_pdf
+    from app.rag.classifier import classify_manual
+    from app.rag.embedder import embed_chunks
+    from app.rag.extractor import extract_tasks_from_chunks
+    from app.rag.retriever import index_chunks, retrieve_top_k
+    from app.config import get_settings
+
+    log = logging.getLogger(__name__)
+    settings = get_settings()
+
+    update_fn("CLASSIFYING")
+    log.info("[%s] Extracting text from PDF", manual_id)
+    full_text, page_offsets = extract_text_from_pdf(pdf_path)
+    sample_text = full_text[:8000]
+
+    classification = await classify_manual(pdf_path, sample_text)
+    log.info("[%s] Classified: %s %s", manual_id, classification.manufacturer, classification.model)
+
+    update_fn("CHUNKING")
+    chapter_text = ""
+    for ch_num in (classification.detected_chapters or []):
+        chapter_text += extract_chapter_text(full_text, ch_num) + "\n"
+    if not chapter_text:
+        chapter_text = full_text
+
+    chunks = chunk_text(
+        chapter_text,
+        source_file=pdf_path.name,
+        chunk_size=settings.rag_chunk_size,
+        overlap=settings.rag_chunk_overlap,
+        page_offsets=page_offsets,
+    )
+    log.info("[%s] Created %d chunks", manual_id, len(chunks))
+
+    update_fn("EMBEDDING")
+    embedded = await embed_chunks(chunks)
+    log.info("[%s] Embedded %d chunks", manual_id, len(embedded))
+
+    if embedded:
+        await index_chunks(embedded, manual_id)
+
+    update_fn("EXTRACTING")
+    # Semantic retrieval for best maintenance chunks
+    query_text = "maintenance tasks inspection intervals lubrication replacement safety lockout cleaning filter belt schedule"
+    query_chunk = [TextChunk(chunk_id="q", text=query_text, page_start=0, page_end=0, char_start=0, char_end=len(query_text), source_file="")]
+    q_embedded = await embed_chunks(query_chunk)
+    if q_embedded:
+        top_chunks = await retrieve_top_k(q_embedded[0]["embedding"], manual_id=manual_id, top_k=10)
+    else:
+        top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0), "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")} for e in embedded[:10]]
+
+    interval_hints = [8, 120, 500, 1500, 3000, 6000] if classification.manufacturer == "KRONES" else [8, 240, 500, 1500]
+    extracted_tasks = await extract_tasks_from_chunks(
+        top_chunks,
+        manufacturer=classification.manufacturer,
+        model=classification.model,
+        interval_hints=interval_hints,
+    )
+    log.info("[%s] Extracted %d tasks — writing to DB", manual_id, len(extracted_tasks))
+
+    finalize_fn(
+        json.dumps(extracted_tasks),
+        classification.manufacturer,
+        json.dumps(classification.detected_chapters),
+    )

@@ -6,6 +6,20 @@ let histOffset = 0;
 const histLimit = 20;
 let histTotal = 0;
 
+// ─── Authenticated download helper ───────────────────────────────────────────
+// Appends ?token=XXX to local download URLs so the browser can open them directly
+function makeDownloadUrl(url) {
+  if (!url) return '#';
+  const token = localStorage.getItem('pm_token');
+  if (!token) return url;
+  // Azure Blob URLs already have SAS tokens — don't add ours
+  if (url.startsWith('https://') && url.includes('.blob.core.windows.net')) return url;
+  if (url.startsWith('sftp://') || url.startsWith('ftp://')) return url;
+  // Local /api/download/... path — append token as query param
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -38,39 +52,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 function initUserUI() {
   const u = currentUser;
   const nameEl = document.getElementById('userName');
-  const roleEl = document.getElementById('userRole');
   const avatarEl = document.getElementById('userAvatar');
   if (nameEl) nameEl.textContent = u.name || u.email;
-  if (roleEl) roleEl.textContent = u.role;
   if (avatarEl) avatarEl.textContent = (u.name || u.email || '?')[0].toUpperCase();
 }
 
-function applyRoleUI() {
-  if (!currentUser) return;
-  const role = currentUser.role;
-  // Hide upload nav for non-engineers/managers
-  if (!['Manager', 'Engineer'].includes(role)) {
-    const el = document.getElementById('nav-upload');
-    if (el) el.style.display = 'none';
-    const sec = document.getElementById('nav-section-upload');
-    if (sec) sec.style.display = 'none';
-  }
-  // Hide export nav for non-managers
-  if (role !== 'Manager') {
-    const el = document.getElementById('nav-export');
-    if (el) el.style.display = 'none';
-  }
-  // Hide manager section if technician/supervisor
-  if (!['Manager', 'Engineer'].includes(role)) {
-    const sec = document.getElementById('nav-section-manager');
-    if (sec) sec.style.display = 'none';
-  }
-  // Add machine button for non-managers/engineers
-  const addBtn = document.getElementById('addMachineBtn');
-  if (addBtn && !['Manager', 'Engineer'].includes(role)) {
-    addBtn.style.display = 'none';
-  }
-}
+// Every signed-in user sees the same simple menu. Permissions are still
+// enforced server-side — actions a user isn't allowed to do return a clear
+// error from the API rather than being hidden behind role-specific menus.
+function applyRoleUI() {}
 
 // ─── Navigation ───────────────────────────────────────────────────────────────
 
@@ -103,17 +93,70 @@ function showPage(name) {
   if (name === 'machines') loadMachines();
   if (name === 'upload') loadUploads();
   if (name === 'chat') initChat();
+  if (name === 'checklist') loadRecentPMsForChecklist();
+}
+
+// ─── Token management ─────────────────────────────────────────────────────────
+
+async function getFreshToken() {
+  let token = localStorage.getItem('pm_token');
+  if (!token) return null;
+
+  // Check expiry from JWT payload — refresh if < 10 minutes left
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    const expiresAt = payload.exp * 1000;
+    if (Date.now() > expiresAt - 10 * 60 * 1000) {
+      const user = JSON.parse(localStorage.getItem('pm_user') || '{}');
+      if (user.email) {
+        const r = await fetch(API + '/dev/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: user.email, name: user.name || user.email, role: user.role || 'Manager' }),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          token = data.access_token;
+          localStorage.setItem('pm_token', token);
+          console.log('Token auto-refreshed silently');
+        }
+      }
+    }
+  } catch(e) { /* decode failed — use token as-is */ }
+
+  return token;
 }
 
 // ─── API helper ───────────────────────────────────────────────────────────────
 
 async function api(path, opts = {}) {
-  const token = localStorage.getItem('pm_token');
+  const token = await getFreshToken();
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(API + path, { ...opts, headers });
-  if (res.status === 401) { logout(); return null; }
+  if (res.status === 401) {
+    // Try one silent re-auth before logging out
+    const user = JSON.parse(localStorage.getItem('pm_user') || '{}');
+    if (user.email) {
+      try {
+        const r = await fetch(API + '/dev/token', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: user.email, name: user.name, role: user.role }),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          localStorage.setItem('pm_token', data.access_token);
+          // Retry original request with new token
+          const retryHeaders = { ...headers, 'Authorization': `Bearer ${data.access_token}` };
+          const retry = await fetch(API + path, { ...opts, headers: retryHeaders });
+          if (retry.ok) return retry.status === 204 ? null : retry.json();
+        }
+      } catch(e) {}
+    }
+    logout();
+    return null;
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Request failed' }));
     throw new Error(err.detail || `HTTP ${res.status}`);
@@ -277,7 +320,7 @@ async function submitGenerate(e) {
       ${data.task_count} tasks · ${(data.file_size_bytes / 1024).toFixed(1)} KB · ${data.storage_target}
     `;
     const link = document.getElementById('genDownloadLink');
-    link.href = data.download_url;
+    link.href = makeDownloadUrl(data.download_url);
     link.textContent = `⬇ Download ${data.output_format?.toUpperCase() || 'PDF'}`;
     document.getElementById('genFileName').textContent = data.file_name;
     document.getElementById('genHash').textContent = data.file_hash;
@@ -360,21 +403,36 @@ async function loadHistory() {
     document.getElementById('histNext').disabled = histOffset + histLimit >= histTotal;
 
     if (data.records.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">🕐</div><p>No PM records found</p></div></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">🕐</div><p>No PM records found</p></div></td></tr>`;
       return;
     }
 
     tbody.innerHTML = data.records.map(r => `
       <tr>
-        <td>${new Date(r.created_at).toLocaleString()}</td>
+        <td style="font-size:11px;color:var(--grey-500)">${new Date(r.created_at).toLocaleString()}</td>
         <td><strong>${r.machine_name}</strong></td>
         <td>${r.interval_label}</td>
-        <td><code>${r.work_order}</code></td>
+        <td><code style="font-size:11px">${r.work_order}</code></td>
         <td>${r.technician_name}</td>
         <td>${statusBadge(r.status)}</td>
         <td>
-          ${r.download_url ? `<a href="${r.download_url}" target="_blank" class="btn btn-primary btn-sm">⬇ Download</a>` : ''}
-          ${(r.status === 'COMPLETED' && canApprove()) ? `<button class="btn btn-success btn-sm" style="margin-left:4px" onclick="approveRecord('${r.record_id}')">✓ Approve</button>` : ''}
+          ${r.download_url
+            ? `<a href="${makeDownloadUrl(r.download_url)}" target="_blank" class="btn btn-primary btn-sm">⬇ PDF</a>`
+            : ''}
+          <button class="btn btn-outline btn-sm" style="margin-left:4px"
+            onclick="fillChecklistById('${r.record_id}')" title="Fill Checklist for this PM">
+            ✅ Fill
+          </button>
+          ${(r.status === 'COMPLETED' && canApprove())
+            ? `<button class="btn btn-success btn-sm" style="margin-left:4px" onclick="approveRecord('${r.record_id}')">✓ Approve</button>`
+            : ''}
+        </td>
+        <td>
+          <span style="font-size:10px;color:var(--grey-500);font-family:monospace"
+            title="PM Record ID — click to copy" onclick="copyText('${r.record_id}',this)"
+            style="cursor:pointer">
+            ${r.record_id.substring(0, 8)}…
+          </span>
         </td>
       </tr>`).join('');
   } catch(e) {
@@ -385,6 +443,22 @@ async function loadHistory() {
 function histPage(dir) {
   histOffset = Math.max(0, histOffset + dir * histLimit);
   loadHistory();
+}
+
+function fillChecklistById(recordId) {
+  showPage('checklist');
+  setTimeout(() => {
+    const inp = document.getElementById('cl-record-id');
+    if (inp) { inp.value = recordId; loadChecklist(); }
+  }, 200);
+}
+
+function copyText(text, el) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = el.textContent;
+    el.textContent = 'Copied!';
+    setTimeout(() => { el.textContent = orig; }, 1500);
+  });
 }
 
 async function approveRecord(recordId) {
@@ -528,22 +602,55 @@ async function submitNewMachine(e) {
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
 
+// ─── Upload & RAG Pipeline (full integrated workflow) ─────────────────────────
+
+let _currentManualId = null;
+let _pipelinePoller = null;
+
+const PIPELINE_STEPS = [
+  { key: 'UPLOADED',       label: 'Uploaded',               icon: '📤' },
+  { key: 'CLASSIFYING',    label: 'Classifying manufacturer', icon: '🔍' },
+  { key: 'CHUNKING',       label: 'Chunking text (500w)',    icon: '✂️' },
+  { key: 'EMBEDDING',      label: 'Embedding with IBM Granite', icon: '🧠' },
+  { key: 'EXTRACTING',     label: 'Extracting PM tasks',     icon: '⚙️' },
+  { key: 'PENDING_REVIEW', label: 'Ready for review',        icon: '✅' },
+  { key: 'APPROVED',       label: 'Approved & added to library', icon: '🎉' },
+];
+
+function renderPipelineSteps(currentStatus) {
+  const currentIdx = PIPELINE_STEPS.findIndex(s => s.key === currentStatus);
+  return PIPELINE_STEPS.map((step, i) => {
+    let state = 'pending';
+    if (i < currentIdx) state = 'done';
+    else if (i === currentIdx) state = 'active';
+    const color = state === 'done' ? 'var(--green)' : state === 'active' ? 'var(--navy)' : 'var(--grey-300)';
+    const textColor = state === 'pending' ? 'var(--grey-500)' : 'var(--text)';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--grey-200)">
+      <span style="font-size:16px">${state === 'done' ? '✅' : state === 'active' ? '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>' : '⬜'}</span>
+      <span style="font-size:13px;color:${textColor};font-weight:${state === 'active' ? '700' : '400'}">${step.icon} ${step.label}</span>
+      ${state === 'active' ? '<span class="badge badge-amber" style="margin-left:auto;font-size:10px">RUNNING</span>' : ''}
+      ${state === 'done' ? '<span style="margin-left:auto;font-size:11px;color:var(--green)">✓</span>' : ''}
+    </div>`;
+  }).join('');
+}
+
 async function submitUpload(e) {
   e.preventDefault();
   const btn = document.getElementById('uploadBtn');
-  const alert = document.getElementById('uploadAlert');
+  const alertEl = document.getElementById('uploadAlert');
   btn.disabled = true;
-  btn.textContent = '⬆️ Uploading...';
-  alert.innerHTML = '';
+  btn.textContent = '⬆ Uploading...';
+  alertEl.innerHTML = '';
 
   const file = document.getElementById('upload-file').files[0];
-  const machineId = document.getElementById('upload-machine').value;
+  if (!file) { alertEl.innerHTML = '<div class="alert alert-danger">Please select a PDF file</div>'; btn.disabled = false; btn.textContent = '⬆ Upload & Start AI Processing'; return; }
 
+  const machineId = document.getElementById('upload-machine').value;
   const formData = new FormData();
   formData.append('file', file);
   if (machineId) formData.append('machine_id', machineId);
 
-  const token = localStorage.getItem('pm_token');
+  const token = await getFreshToken();
   try {
     const res = await fetch(API + '/api/manual/upload', {
       method: 'POST',
@@ -555,23 +662,175 @@ async function submitUpload(e) {
       throw new Error(err.detail);
     }
     const data = await res.json();
-    alert.innerHTML = `
-      <div class="alert alert-success">
-        ✅ Manual uploaded! Manual ID: <code>${data.manual_id}</code><br/>
-        RAG pipeline is running in background. Check the queue below for status.
-      </div>`;
+    _currentManualId = data.manual_id;
+
+    // Show progress panel
+    document.getElementById('pipelineProgress').style.display = 'block';
     document.getElementById('uploadForm').reset();
-    setTimeout(loadUploads, 2000);
+    btn.disabled = false;
+    btn.textContent = '⬆ Upload & Start AI Processing';
+
+    // Start polling
+    _startPipelinePoller(_currentManualId);
   } catch(err) {
-    alert.innerHTML = `<div class="alert alert-danger">❌ ${err.message}</div>`;
+    alertEl.innerHTML = `<div class="alert alert-danger">❌ ${err.message}</div>`;
+    btn.disabled = false;
+    btn.textContent = '⬆ Upload & Start AI Processing';
+  }
+}
+
+function _startPipelinePoller(manualId) {
+  if (_pipelinePoller) clearInterval(_pipelinePoller);
+  _pipelinePoller = setInterval(async () => {
+    await _pollPipelineStatus(manualId);
+  }, 3000);
+  _pollPipelineStatus(manualId);
+}
+
+async function _pollPipelineStatus(manualId) {
+  try {
+    const data = await api(`/api/manual/uploads/${manualId}`);
+    if (!data) return;
+    _updatePipelineUI(data);
+    if (['APPROVED', 'FAILED'].includes(data.status)) {
+      clearInterval(_pipelinePoller);
+    }
+  } catch(e) {
+    console.warn('Pipeline poll error:', e);
+  }
+}
+
+function _updatePipelineUI(data) {
+  const stepsEl = document.getElementById('pipelineSteps');
+  const badge = document.getElementById('pipelineStatusBadge');
+  const detailsEl = document.getElementById('pipelineDetails');
+  const reviewCard = document.getElementById('reviewCard');
+  const generateCard = document.getElementById('generateCard');
+
+  if (stepsEl) stepsEl.innerHTML = renderPipelineSteps(data.status);
+
+  if (badge) {
+    const badgeMap = { UPLOADED:'badge-grey', CLASSIFYING:'badge-amber', CHUNKING:'badge-amber',
+      EMBEDDING:'badge-amber', EXTRACTING:'badge-amber', PENDING_REVIEW:'badge-blue',
+      APPROVED:'badge-green', FAILED:'badge-red' };
+    badge.className = `badge ${badgeMap[data.status] || 'badge-grey'}`;
+    badge.textContent = data.status.replace('_',' ');
+  }
+
+  if (detailsEl) {
+    const info = [];
+    if (data.detected_manufacturer) info.push(`Manufacturer: <strong>${data.detected_manufacturer}</strong>`);
+    if (data.detected_chapters?.length) info.push(`Maintenance chapters: <strong>${data.detected_chapters.join(', ')}</strong>`);
+    if (data.extracted_task_count) info.push(`Tasks extracted: <strong>${data.extracted_task_count}</strong>`);
+    if (data.error_message) info.push(`<span style="color:var(--red)">Error: ${data.error_message}</span>`);
+    detailsEl.innerHTML = info.join(' &nbsp;|&nbsp; ');
+  }
+
+  // Show review card when PENDING_REVIEW
+  if (data.status === 'PENDING_REVIEW' && reviewCard) {
+    reviewCard.style.display = 'block';
+    document.getElementById('reviewTaskCount').textContent = `${data.extracted_task_count || 0} tasks`;
+
+    // Populate machine dropdown for review
+    const sel = document.getElementById('review-machine-select');
+    if (sel && sel.options.length === 1) {
+      const genSel = document.getElementById('gen-machine');
+      if (genSel) Array.from(genSel.options).slice(1).forEach(o => sel.appendChild(o.cloneNode(true)));
+    }
+    if (data.machine_id && sel) sel.value = data.machine_id;
+
+    // Show extracted tasks preview
+    const tasksEl = document.getElementById('reviewTasksList');
+    if (tasksEl && data.extracted_tasks?.length) {
+      tasksEl.innerHTML = `<table style="width:100%;font-size:12px">
+        <thead><tr><th style="padding:4px 8px;background:var(--grey-200)">#</th><th style="padding:4px 8px;background:var(--grey-200)">Area</th><th style="padding:4px 8px;background:var(--grey-200)">Action</th><th style="padding:4px 8px;background:var(--grey-200)">Description (first 80 chars)</th><th style="padding:4px 8px;background:var(--grey-200)">Hrs</th></tr></thead>
+        <tbody>${data.extracted_tasks.slice(0,20).map(t => `
+          <tr style="border-bottom:1px solid var(--grey-200)">
+            <td style="padding:3px 8px">${t.task_no || '—'}</td>
+            <td style="padding:3px 8px">${t.area || '—'}</td>
+            <td style="padding:3px 8px">${t.action || '—'}</td>
+            <td style="padding:3px 8px;font-size:11px">${(t.description || '').substring(0,80)}${(t.description||'').length>80?'…':''}</td>
+            <td style="padding:3px 8px">${t.interval_hours || '—'}</td>
+          </tr>`).join('')}
+        </tbody></table>
+        ${data.extracted_tasks.length > 20 ? `<p style="font-size:11px;color:var(--grey-500);text-align:center;margin:8px 0">... and ${data.extracted_tasks.length - 20} more tasks</p>` : ''}`;
+    } else if (tasksEl) {
+      tasksEl.innerHTML = '<div class="empty-state" style="padding:20px"><p>Tasks will appear here after extraction</p></div>';
+    }
+  }
+
+  if (data.status === 'APPROVED' && generateCard) {
+    reviewCard.style.display = 'none';
+    generateCard.style.display = 'block';
+    const s = document.getElementById('approvalSuccess');
+    if (s) s.innerHTML = `✅ <strong>${data.extracted_task_count || 'New'} tasks added to PM Library for ${data.machine_id || 'the machine'}.</strong> You can now generate PM documents using these tasks.`;
+    loadIntervalButtons(data.machine_id);
+  }
+}
+
+function loadIntervalButtons(machineId) {
+  if (!machineId) return;
+  api(`/api/library/${machineId}/intervals 2>/dev/null`).catch(() => null); // graceful
+  api('/api/library').then(lib => {
+    if (!lib) return;
+    const machine = lib.machines.find(m => m.machine_id === machineId);
+    if (!machine) return;
+    const container = document.getElementById('generateIntervalButtons');
+    if (!container) return;
+    container.innerHTML = machine.intervals.filter(iv => iv.task_count > 0).map(iv =>
+      `<button class="btn btn-primary btn-sm" onclick="quickGenerate('${machineId}',${iv.hours})">
+        Generate ${iv.label} PM (${iv.task_count} tasks)
+      </button>`
+    ).join('');
+  }).catch(() => null);
+}
+
+async function approvePipeline() {
+  if (!_currentManualId) return;
+  const machineId = document.getElementById('review-machine-select')?.value;
+  if (!machineId) { alert('Please select a machine first'); return; }
+
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Approving...';
+
+  try {
+    const token = await getFreshToken();
+    const fd = new FormData();
+    fd.append('machine_id', machineId);
+    const res = await fetch(API + `/api/manual/uploads/${_currentManualId}/approve`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: fd,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail);
+    _updatePipelineUI({ ...(await api(`/api/manual/uploads/${_currentManualId}`)), status: 'APPROVED', machine_id: machineId, extracted_task_count: data.tasks_added_to_library });
+    loadUploads();
+    loadMachinesForSelects();
+  } catch(e) {
+    alert('Approval failed: ' + e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = '⬆️ Upload & Process';
+    btn.textContent = '✓ Approve & Add to PM Library';
   }
+}
+
+function startNewChat() {
+  showPage('chat');
+  setTimeout(() => {
+    const machId = document.getElementById('review-machine-select')?.value;
+    if (machId) {
+      const filter = document.getElementById('chat-machine-filter');
+      if (filter) filter.value = machId;
+    }
+    newChatSession();
+  }, 300);
 }
 
 async function loadUploads() {
   const tbody = document.getElementById('uploadQueueBody');
+  if (!tbody) return;
   try {
     const uploads = await api('/api/manual/uploads');
     if (!uploads || uploads.length === 0) {
@@ -580,16 +839,18 @@ async function loadUploads() {
     }
     tbody.innerHTML = uploads.map(u => `
       <tr>
-        <td>${u.filename}</td>
+        <td style="font-size:12px">${u.filename}</td>
         <td>${u.machine_id || '—'}</td>
         <td>${pipelineBadge(u.status)}</td>
         <td>${u.detected_manufacturer || '—'}</td>
-        <td>${u.task_count}</td>
-        <td>${u.uploaded_by || '—'}</td>
+        <td><strong>${u.task_count}</strong></td>
+        <td style="font-size:11px">${u.uploaded_by || '—'}</td>
         <td>
-          ${u.status === 'PENDING_REVIEW' ?
-            `<button class="btn btn-success btn-sm" onclick="approveManual('${u.manual_id}','${u.machine_id}')">✓ Approve</button>` :
-            `<button class="btn btn-outline btn-sm" onclick="viewUpload('${u.manual_id}')">View</button>`}
+          ${u.status === 'PENDING_REVIEW'
+            ? `<button class="btn btn-success btn-sm" onclick="resumePipelineReview('${u.manual_id}')">✓ Review</button>`
+            : u.status === 'APPROVED'
+              ? `<button class="btn btn-outline btn-sm" onclick="quickGenerate('${u.machine_id || ''}',8)">Generate</button>`
+              : `<button class="btn btn-outline btn-sm" onclick="refreshUploadStatus('${u.manual_id}')">↻ Status</button>`}
         </td>
       </tr>`).join('');
   } catch(e) {
@@ -597,25 +858,20 @@ async function loadUploads() {
   }
 }
 
+async function resumePipelineReview(manualId) {
+  _currentManualId = manualId;
+  document.getElementById('pipelineProgress').style.display = 'block';
+  _pollPipelineStatus(manualId);
+}
+
+async function refreshUploadStatus(manualId) {
+  _currentManualId = manualId;
+  document.getElementById('pipelineProgress').style.display = 'block';
+  _startPipelinePoller(manualId);
+}
+
 async function approveManual(manualId, machineId) {
-  const targetMachine = prompt('Machine ID to add tasks to:', machineId || '');
-  if (!targetMachine) return;
-  try {
-    const formData = new FormData();
-    formData.append('machine_id', targetMachine);
-    const token = localStorage.getItem('pm_token');
-    const res = await fetch(API + `/api/manual/uploads/${manualId}/approve`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: formData,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail);
-    alert(`✅ Approved! ${data.tasks_added_to_library} tasks added to PM Library for ${targetMachine}`);
-    loadUploads();
-  } catch(e) {
-    alert('Approval failed: ' + e.message);
-  }
+  return resumePipelineReview(manualId);
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -649,6 +905,44 @@ function showLoading(text) {
 function hideLoading() {
   document.getElementById('loadingOverlay').classList.remove('open');
 }
+
+// ─── Checklist helpers ───────────────────────────────────────────────────────
+
+function showPageAndLoadLatest() {
+  // Show the recent PMs picker in sidebar
+  loadRecentPMsForChecklist();
+}
+
+async function loadRecentPMsForChecklist() {
+  const container = document.getElementById('recentPMsForChecklist');
+  if (!container) return;
+  try {
+    const data = await api('/api/history?limit=10');
+    if (!data || !data.records?.length) {
+      container.innerHTML = `<div style="font-size:12px;color:var(--grey-500);padding:8px">
+        No PM records yet.<br/>Generate a PM first from the Generate PM page.
+      </div>`;
+      return;
+    }
+    container.innerHTML = data.records.map(r => `
+      <div onclick="fillChecklistById('${r.record_id}')"
+        style="padding:8px 10px;border-bottom:1px solid var(--grey-200);cursor:pointer;font-size:12px;
+               transition:background .15s" onmouseover="this.style.background='var(--grey-100)'"
+               onmouseout="this.style.background=''">
+        <div style="font-weight:600;color:var(--navy)">${r.machine_name} — ${r.interval_label}</div>
+        <div style="color:var(--grey-500);font-size:11px">${r.work_order} | ${r.technician_name}</div>
+        <div style="display:flex;justify-content:space-between;margin-top:2px">
+          ${statusBadge(r.status)}
+          <span style="font-size:10px;color:var(--grey-500)">${new Date(r.created_at).toLocaleDateString()}</span>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    container.innerHTML = `<div style="font-size:12px;color:var(--red);padding:8px">${e.message}</div>`;
+  }
+}
+
+// Auto-load recent PMs when checklist page is opened
+const _origShowPage = showPage;
 
 function logout() {
   localStorage.removeItem('pm_token');
@@ -844,15 +1138,26 @@ async function initChat() {
       });
     }
   }
-  // Check if AI is configured
+  // Check AI status and show correct badge
   try {
     const status = await api('/api/chat/status');
-    if (status && !status.ai_ready) {
-      const warning = document.getElementById('chatApiWarning');
-      if (warning) {
-        const provider = status.ai_provider === 'watsonx' ? 'WATSONX_API_KEY + WATSONX_PROJECT_ID' : 'OPENAI_API_KEY';
-        warning.innerHTML = `⚠️ AI not configured — set <code>${provider}</code> in <code>.env</code> and restart the server to enable AI responses.`;
-        warning.style.display = 'block';
+    if (status) {
+      if (!status.ai_ready) {
+        const warning = document.getElementById('chatApiWarning');
+        if (warning) warning.style.display = 'block';
+      } else {
+        // Show green "AI connected" badge with model name
+        const badge = document.getElementById('chatAiReadyBadge');
+        const modelEl = document.getElementById('chatModelName');
+        if (badge) badge.style.display = 'block';
+        if (modelEl && status.models) {
+          const model = status.models.chat_model || status.models.classification_model || '';
+          modelEl.textContent = `Model: ${model}`;
+        }
+        if (status.rag_ready) {
+          const ragBadge = document.getElementById('chatRagBadge');
+          if (ragBadge) ragBadge.style.display = 'inline-block';
+        }
       }
     }
   } catch(e) {}
@@ -941,6 +1246,22 @@ async function sendChatMessage() {
   if (_chatSending) return;
   const input = document.getElementById('chatInput');
   const message = input.value.trim();
+  if (!message && !_chatUploadFile) return;
+
+  // If user hits Send while a file is selected — auto-upload it first, then send message
+  if (_chatUploadFile) {
+    const file = _chatUploadFile;
+    _chatUploadFile = null;
+    document.getElementById('chatFileInput').value = '';
+    document.getElementById('chatUploadStrip').style.display = 'none';
+    const manualId = await _doUpload(file);
+    if (manualId) {
+      _activeManualId = manualId;
+      _pollManualStatus(manualId, file.name);  // start background status polling
+    }
+    if (!message) return;   // file-only send: just upload, no message yet
+  }
+
   if (!message) return;
 
   // Create session on first message if none exists
@@ -976,7 +1297,11 @@ async function sendChatMessage() {
   try {
     const resp = await api(`/api/chat/sessions/${_chatSessionId}/message`, {
       method: 'POST',
-      body: JSON.stringify({ message, machine_id: machineId || null }),
+      body: JSON.stringify({
+        message,
+        machine_id: machineId || null,
+        manual_id: _activeManualId || null,
+      }),
     });
     if (resp) {
       appendMessage('assistant', resp.content, resp.has_checklist);
@@ -999,6 +1324,130 @@ function sendSuggestion(text) {
   const input = document.getElementById('chatInput');
   input.value = text;
   sendChatMessage();
+}
+
+// ── In-chat manual upload ─────────────────────────────────────────────────────
+let _chatUploadFile = null;
+let _activeManualId = null;   // manual_id of the last successfully processed upload — sent with every chat message
+
+function onChatFileSelected(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  _chatUploadFile = file;
+  document.getElementById('chatUploadFileName').textContent = `📄 ${file.name} (${(file.size/1024).toFixed(0)} KB)`;
+  document.getElementById('chatUploadStrip').style.display = 'flex';
+}
+
+function cancelChatUpload() {
+  _chatUploadFile = null;
+  document.getElementById('chatFileInput').value = '';
+  document.getElementById('chatUploadStrip').style.display = 'none';
+  document.getElementById('chatUploadProgress').style.display = 'none';
+}
+
+/**
+ * Upload the pending file and return the manual_id on success, or null on failure.
+ * Shows progress in the upload progress bar (does NOT show the chat strip — caller hides it).
+ */
+async function _doUpload(file) {
+  const progress = document.getElementById('chatUploadProgress');
+  progress.style.cssText = 'display:block;background:#D5F5E3;border:1px solid #A9DFBF;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#1E8449';
+  progress.textContent = `⏳ Uploading ${file.name}… (${(file.size/1024/1024).toFixed(1)} MB)`;
+
+  const token = await getFreshToken();
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    const res = await fetch(API + '/api/manual/upload', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      progress.style.background = '#FDEDEC';
+      progress.style.borderColor = '#F1948A';
+      progress.style.color = '#922B21';
+      progress.textContent = `Upload failed: ${err.detail || res.statusText}`;
+      return null;
+    }
+    const data = await res.json();
+    progress.textContent = `⏳ "${file.name}" uploaded — starting RAG pipeline (classifying, chunking, embedding)…`;
+    // Do NOT hide here — _pollManualStatus will manage the progress bar
+    return data.manual_id;
+  } catch(e) {
+    progress.style.background = '#FDEDEC';
+    progress.style.color = '#922B21';
+    progress.textContent = `Upload error: ${e.message}`;
+    return null;
+  }
+}
+
+/** "Upload & Process" button — upload without sending a message */
+async function submitChatUpload() {
+  if (!_chatUploadFile) return;
+  const file = _chatUploadFile;
+  _chatUploadFile = null;
+  document.getElementById('chatFileInput').value = '';
+  document.getElementById('chatUploadStrip').style.display = 'none';
+
+  const manualId = await _doUpload(file);
+  if (manualId) {
+    _activeManualId = manualId;
+    appendMessage('assistant',
+      `**Manual uploaded:** ${file.name}\n\nRAG pipeline is now running — classifying, chunking, and embedding the document (1–3 minutes).\n\nI will notify you when it's ready. While waiting you can already ask questions — I'll answer from the document as soon as indexing completes.`,
+      false
+    );
+    _pollManualStatus(manualId, file.name);
+  }
+}
+
+/** Poll the status endpoint every 10s until the pipeline is done, then notify the user */
+async function _pollManualStatus(manualId, filename) {
+  const maxAttempts = 30;  // 30 × 10s = 5 minutes max
+  let attempt = 0;
+  const progress = document.getElementById('chatUploadProgress');
+
+  const tick = async () => {
+    attempt++;
+    try {
+      const status = await api(`/api/manual/uploads/${manualId}/status`);
+      if (!status) return;
+
+      if (status.ready) {
+        _activeManualId = manualId;
+        progress.style.cssText = 'display:block;background:#D5F5E3;border:1px solid #82E0AA;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#1E8449';
+        progress.textContent = `✅ "${filename}" is ready! ${status.task_count} tasks extracted. Ask me anything from this manual.`;
+        appendMessage('assistant',
+          `**"${filename}" is fully processed and ready!**\n\n${status.task_count > 0 ? `${status.task_count} maintenance tasks were extracted.` : ''}\n\nYou can now ask:\n- *"What are the 8hr daily checks?"*\n- *"Generate a complete checklist for this machine"*\n- *"What does the manual say about lubrication?"*\n- *"List all safety procedures"*\n- *"Generate the checklist as an Excel sheet"*`,
+          false
+        );
+        setTimeout(() => { progress.style.display = 'none'; }, 15000);
+        return;  // done polling
+      }
+
+      if (status.status === 'FAILED') {
+        progress.style.cssText = 'display:block;background:#FDEDEC;border:1px solid #F1948A;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#922B21';
+        progress.textContent = `❌ Processing failed: ${status.error || 'Unknown error'}. Try re-uploading.`;
+        return;
+      }
+
+      // Still running — update progress bar
+      progress.style.cssText = 'display:block;background:#EBF5FB;border:1px solid #AED6F1;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#1A5276';
+      progress.textContent = `⏳ ${status.label} (${status.progress}%)`;
+
+      if (attempt < maxAttempts) {
+        setTimeout(tick, 10000);
+      } else {
+        progress.textContent = '⚠️ Processing is taking longer than expected. You can still try asking questions.';
+      }
+    } catch(e) {
+      if (attempt < maxAttempts) setTimeout(tick, 15000);
+    }
+  };
+
+  setTimeout(tick, 8000);  // first check after 8s
 }
 
 function appendMessage(role, content, hasChecklist) {
@@ -1036,7 +1485,8 @@ function clearChatMessages() {
         Ask about maintenance procedures, generate checklists, check safety requirements, or get PM schedule advice.
       </p>
       <div class="chat-suggestions">
-        <button class="chat-suggestion" onclick="sendSuggestion('Generate a 500hr PM checklist for VARIOPAC-PRO-L3')">Generate 500hr PM checklist for VARIOPAC-PRO-L3</button>
+        <button class="chat-suggestion" onclick="sendSuggestion('Generate the 240hr PM checklist for the bottle coder as an Excel sheet')">Generate 240hr Bottle Coder PM as Excel</button>
+                <button class="chat-suggestion" onclick="sendSuggestion('Give me a PDF of the 8hr PM for the dehumidifier')">PDF of 8hr Dehumidifier PM</button>
         <button class="chat-suggestion" onclick="sendSuggestion('What LOTO steps are required before servicing the CONTIFORM-C3-L3?')">LOTO steps for CONTIFORM-C3-L3</button>
         <button class="chat-suggestion" onclick="sendSuggestion('What maintenance tasks are overdue on Line 3?')">What PMs are overdue?</button>
         <button class="chat-suggestion" onclick="sendSuggestion('List all lubrication tasks for Krones machines at 1500hr interval')">Lubrication tasks at 1500hr</button>
@@ -1099,6 +1549,11 @@ function renderMarkdown(text) {
     .replace(/```[\s\S]*?```/g, m => `<pre><code>${m.slice(3, -3).replace(/^[^\n]*\n?/, '')}</code></pre>`)
     // Inline code
     .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Links — generated-document download links render as a green button (with auth token attached)
+    .replace(/\[([^\]]+)\]\((\/api\/download\/[^)]+)\)/g,
+      (_, label, url) => `<a href="${makeDownloadUrl(url)}" target="_blank" rel="noopener" class="btn btn-success btn-sm" style="display:inline-block;margin-top:6px;text-decoration:none">${label}</a>`)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+|\/[^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>')
     // Bold
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     // Headings

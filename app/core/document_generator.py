@@ -32,6 +32,7 @@ from docx.shared import Pt, RGBColor, Inches, Cm
 # ── openpyxl ──────────────────────────────────────────────────────────────────
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from app.db.models import Task
 
@@ -549,91 +550,153 @@ def generate_docx(doc: PMDocument, output_path: Path) -> Path:
 
 
 # ─── XLSX generator ───────────────────────────────────────────────────────────
+# Matches the Niagara/Krones "Asset Activity" Excel template exactly:
+#   Row 1: Asset Activity header row
+#   Row 3: Column headers — Task | Function / Area | Action | Initial
+#   Row 4+: Task data (task_no, area, description)
+#   Parts table, sign-off fields, END OF REPORT footer
 
 def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
-    ws.title = f"{doc.interval_label} PM"
 
-    navy = "1B3A6B"
-    light_grey = "F2F2F2"
-    header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=10)
-    body_font = Font(name="Calibri", size=9)
-    thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
+    sheet_title = f"{doc.machine_name} {doc.interval_label} PM"
+    ws.title = sheet_title[:31]
+
+    thin = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
     )
+    bold_font = Font(name="Arial", bold=True, size=10)
+    body_font = Font(name="Arial", size=10)
+    header_font = Font(name="Arial", bold=True, size=10)
 
-    # Title
-    ws.merge_cells("A1:H1")
-    ws["A1"] = f"{doc.machine_name.upper()} — {doc.interval_label} PREVENTIVE MAINTENANCE"
-    ws["A1"].font = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor=navy)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 24
+    asset_label = f"{doc.machine_name.upper()} {doc.interval_label.upper()} PM"
 
-    # Header fields (row 2-4)
-    info_rows = [
-        ("Work Order:", doc.work_order, "Technician:", doc.technician_name),
-        ("Machine ID:", doc.machine_id, "Generated:", doc.generated_at.strftime("%d %b %Y %H:%M")),
-        ("Interval:", f"{doc.interval_hours} hrs", "Start Date:", ""),
-    ]
-    for idx, row_data in enumerate(info_rows, start=2):
-        for col, val in enumerate(row_data, start=1):
-            cell = ws.cell(row=idx, column=col, value=val)
-            cell.font = Font(name="Calibri", bold=(col % 2 == 1), size=9)
-            cell.fill = PatternFill("solid", fgColor=light_grey)
-            cell.border = thin_border
+    # Column widths: A=8, B-D=12 each (Function/Area), E-I=16 each (Action), J-K=10 each (Initial)
+    ws.column_dimensions["A"].width = 8
+    for c in ["B", "C", "D"]:
+        ws.column_dimensions[c].width = 12
+    for c in ["E", "F", "G", "H", "I"]:
+        ws.column_dimensions[c].width = 16
+    for c in ["J", "K"]:
+        ws.column_dimensions[c].width = 10
 
-    # Table header (row 6)
-    headers = ["Task #", "Area", "Action", "Description", "Machine State", "Safety", "Part #", "Initial / Done ☐"]
-    for col, h in enumerate(headers, start=1):
-        cell = ws.cell(row=6, column=col, value=h)
-        cell.font = header_font
-        cell.fill = PatternFill("solid", fgColor="2C3E50")
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = thin_border
-    ws.row_dimensions[6].height = 18
+    # ── Row 1: Asset Activity header ─────────────────────────────────────────
+    ws.cell(row=1, column=1, value="Asset\n  Activity:").font = bold_font
+    ws.cell(row=1, column=1).alignment = Alignment(wrap_text=True, vertical="center")
+    ws.cell(row=1, column=1).border = thin
 
-    # Task rows
-    col_widths = [8, 14, 12, 70, 15, 8, 14, 20]
-    for i, w in enumerate(col_widths, start=1):
-        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    ws.merge_cells("B1:C1")
+    ws.cell(row=1, column=2, value=asset_label).font = bold_font
+    ws.cell(row=1, column=2).border = thin
 
-    state_order = ["RUNNING", "STOPPED", "POWERED_OFF"]
-    row_idx = 7
-    for task in sorted(doc.tasks, key=lambda x: (state_order.index(x.machine_state), x.task_no)):
-        fill_colour = "FADBD8" if task.safety_flag else (light_grey if row_idx % 2 == 0 else "FFFFFF")
+    ws.cell(row=1, column=4, value="Description:").font = bold_font
+    ws.cell(row=1, column=4).border = thin
+
+    ws.merge_cells("E1:H1")
+    ws.cell(row=1, column=5, value=asset_label).font = bold_font
+    ws.cell(row=1, column=5).border = thin
+
+    ws.row_dimensions[1].height = 20
+
+    # ── Row 2: empty ─────────────────────────────────────────────────────────
+
+    # ── Row 3: Column headers ────────────────────────────────────────────────
+    r = 3
+    ws.cell(row=r, column=1, value="Task").font = header_font
+    ws.cell(row=r, column=1).border = thin
+
+    ws.merge_cells(f"B{r}:D{r}")
+    ws.cell(row=r, column=2, value="Function / Area").font = header_font
+    ws.cell(row=r, column=2).border = thin
+
+    ws.merge_cells(f"E{r}:I{r}")
+    ws.cell(row=r, column=5, value="Action").font = header_font
+    ws.cell(row=r, column=5).border = thin
+
+    ws.merge_cells(f"J{r}:K{r}")
+    ws.cell(row=r, column=10, value="Initial").font = header_font
+    ws.cell(row=r, column=10).border = thin
+
+    # ── Task rows (starting row 4) ──────────────────────────────────────────
+    row_idx = 4
+    for task in sorted(doc.tasks, key=lambda x: x.task_no):
+        # Task number
+        ws.cell(row=row_idx, column=1, value=task.task_no).font = body_font
+        ws.cell(row=row_idx, column=1).border = thin
+        ws.cell(row=row_idx, column=1).alignment = Alignment(horizontal="right")
+
+        # Function / Area (merged B-D)
+        ws.merge_cells(f"B{row_idx}:D{row_idx}")
+        ws.cell(row=row_idx, column=2, value=task.area).font = body_font
+        ws.cell(row=row_idx, column=2).border = thin
+
+        # Action / Description (merged E-I)
         desc = task.description
         if task.part_number:
-            desc += f" [PART: {task.part_number}]"
-        values = [
-            task.task_no, task.area, task.action, desc,
-            task.machine_state.replace("_", " "), "⚠" if task.safety_flag else "",
-            task.part_number or "", "",
-        ]
-        for col, val in enumerate(values, start=1):
-            cell = ws.cell(row=row_idx, column=col, value=val)
-            cell.font = body_font
-            cell.fill = PatternFill("solid", fgColor=fill_colour)
-            cell.alignment = Alignment(vertical="top", wrap_text=(col == 4))
-            cell.border = thin_border
-        ws.row_dimensions[row_idx].height = 40 if len(task.description) > 100 else 20
+            desc += f"  [PART: {task.part_number}]"
+        ws.merge_cells(f"E{row_idx}:I{row_idx}")
+        ws.cell(row=row_idx, column=5, value=desc).font = body_font
+        ws.cell(row=row_idx, column=5).alignment = Alignment(wrap_text=True)
+        ws.cell(row=row_idx, column=5).border = thin
+
+        # Initial (merged J-K)
+        ws.merge_cells(f"J{row_idx}:K{row_idx}")
+        ws.cell(row=row_idx, column=10).border = thin
+
         row_idx += 1
 
-    # GMP Footer
+    # ── Parts table ──────────────────────────────────────────────────────────
     row_idx += 1
-    ws.cell(row=row_idx, column=1, value="**** END OF REPORT ****").font = Font(bold=True, size=10)
+    parts_hdr_row = row_idx
+
+    parts_headers = [
+        ("A", "B", "Part Number"),
+        ("C", "C", "UOM"),
+        ("D", "E", "Required Qty"),
+        ("F", "F", "Issued Qty"),
+        ("G", "G", "Pick Location"),
+        ("J", "K", "Mechanic"),
+    ]
+    for start_col, end_col, label in parts_headers:
+        if start_col != end_col:
+            ws.merge_cells(f"{start_col}{parts_hdr_row}:{end_col}{parts_hdr_row}")
+        col_num = ord(start_col) - ord("A") + 1
+        cell = ws.cell(row=parts_hdr_row, column=col_num, value=label)
+        cell.font = bold_font
+        cell.border = thin
+
+    # Empty parts rows
+    for _ in range(2):
+        row_idx += 1
+        for c in range(1, 12):
+            ws.cell(row=row_idx, column=c).border = thin
+
+    # ── Sign-off fields ──────────────────────────────────────────────────────
+    row_idx += 2
+    ws.merge_cells(f"A{row_idx}:D{row_idx}")
+    ws.cell(row=row_idx, column=1,
+            value="Actual start date: ___________   Actual end date: ___________   Hours ___________").font = body_font
+
     row_idx += 1
-    ws.cell(row=row_idx, column=1, value="PRIOR TO RETURNING TO SERVICE FOLLOW ALL GMP PROCEDURES")
+    ws.merge_cells(f"A{row_idx}:D{row_idx}")
+    ws.cell(row=row_idx, column=1,
+            value="Comments & Action: ____________________________________________________").font = body_font
+
     row_idx += 1
-    ws.cell(row=row_idx, column=1, value="Remove all LOTO devices before returning to service")
-    row_idx += 1
-    ws.cell(row=row_idx, column=1, value="Re-check all E-STOP and control switches")
+    ws.merge_cells(f"A{row_idx}:D{row_idx}")
+    ws.cell(row=row_idx, column=1,
+            value="Team Member(s): _______________________________________________________").font = body_font
+
+    # ── END OF REPORT ────────────────────────────────────────────────────────
+    row_idx += 2
+    ws.merge_cells(f"A{row_idx}:K{row_idx}")
+    ws.cell(row=row_idx, column=1,
+            value="**************************** END OF REPORT **************************").font = bold_font
+    ws.cell(row=row_idx, column=1).alignment = Alignment(horizontal="center")
 
     wb.save(str(output_path))
     return output_path

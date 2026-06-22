@@ -27,7 +27,11 @@ async def embed_chunks(chunks: list[TextChunk]) -> list[dict]:
 async def _embed_openai(chunks: list[TextChunk]) -> list[dict]:
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    # The `dimensions` parameter is an OpenAI-specific extension (text-embedding-3-*).
+    # OpenAI-compatible servers like Ollama reject it, so only send it against the
+    # real OpenAI endpoint.
+    using_openai_dotcom = not settings.openai_base_url
     results = []
     batch_size = 50
 
@@ -36,11 +40,10 @@ async def _embed_openai(chunks: list[TextChunk]) -> list[dict]:
         texts = [c.text for c in batch]
 
         try:
-            response = await client.embeddings.create(
-                model=settings.openai_embedding_model,
-                input=texts,
-                dimensions=settings.openai_embedding_dims,
-            )
+            kwargs = {"model": settings.openai_embedding_model, "input": texts}
+            if using_openai_dotcom:
+                kwargs["dimensions"] = settings.openai_embedding_dims
+            response = await client.embeddings.create(**kwargs)
             for j, embedding_data in enumerate(response.data):
                 chunk = batch[j]
                 results.append(

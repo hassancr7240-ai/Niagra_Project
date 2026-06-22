@@ -117,13 +117,13 @@ def validate_dev_token(token: str) -> Optional[TokenClaims]:
 
 
 def create_dev_token(user_id: str, email: str, name: str, roles: list[str]) -> str:
-    """Create a short-lived dev token (not used in production)."""
+    """Create a 24-hour dev token. Long enough to never expire during RAG pipeline uploads."""
     payload = {
         "sub": user_id,
         "email": email,
         "name": name,
         "roles": roles,
-        "exp": int(time.time()) + 3600,
+        "exp": int(time.time()) + 86400,  # 24 hours — prevents logout during long uploads
         "iat": int(time.time()),
     }
     return jwt.encode(payload, settings.app_secret_key, algorithm="HS256")

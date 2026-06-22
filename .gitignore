@@ -19,9 +19,20 @@ env/
 
 # SQLite dev database
 data/*.db
+data/*.db-journal
 
 # Generated PM output files
 output/
+
+# Local temp/log files
+server.log
+server_err.log
+*.log
+api_response.txt
+check_name.txt
+doc_content.txt
+last_manual_id.txt
+memory/
 
 # IDE
 .vscode/

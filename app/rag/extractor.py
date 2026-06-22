@@ -70,7 +70,7 @@ async def _extract_openai(
 ) -> list[dict]:
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
 
     user_msg = f"""Machine: {manufacturer} {model or ''}
 Known intervals (hours): {interval_hints or 'detect from text'}

@@ -142,28 +142,21 @@ async def _update_status(
 async def _retrieve_maintenance_chunks(
     embedded: list[dict], manual_id: str
 ) -> list[dict]:
-    """Create a query embedding for 'maintenance tasks intervals' and retrieve top 10."""
+    """
+    Retrieve the top maintenance-relevant chunks by cosine similarity.
+    Uses the vector store (local SQLite or Azure) — always semantic, never positional.
+    """
     if not embedded:
         return []
 
-    if not settings.azure_search_endpoint:
-        # Fallback: return first 10 embedded chunks directly
-        return _to_chunk_dicts(embedded[:10])
-
+    # Embed a maintenance-focused query to find the most relevant sections
+    query_text = (
+        "preventive maintenance tasks inspection intervals lubrication replacement "
+        "safety lockout LOTO cleaning filter belt bearing grease oil schedule checklist"
+    )
     try:
-        # Embed a maintenance-focused query
-        query_text = "maintenance tasks inspection intervals replace clean lubricate safety lockout"
-        from app.rag.embedder import embed_chunks
-        from app.rag.chunker import TextChunk
-        query_chunk = [TextChunk(
-            chunk_id="query",
-            text=query_text,
-            page_start=0,
-            page_end=0,
-            char_start=0,
-            char_end=len(query_text),
-            source_file="query",
-        )]
+        query_chunk = [{"chunk_id": "maint_query", "text": query_text,
+                        "page_start": 0, "page_end": 0, "source_file": "query"}]
         embedded_query = await embed_chunks(query_chunk)
         if not embedded_query:
             return _to_chunk_dicts(embedded[:10])
@@ -173,9 +166,14 @@ async def _retrieve_maintenance_chunks(
             manual_id=manual_id,
             top_k=settings.rag_top_k,
         )
-        return top_chunks or _to_chunk_dicts(embedded[:10])
-    except Exception:
-        return _to_chunk_dicts(embedded[:10])
+        if top_chunks:
+            logger.info("[%s] Retrieved %d maintenance-relevant chunks via semantic search", manual_id, len(top_chunks))
+            return top_chunks
+    except Exception as exc:
+        logger.warning("[%s] Semantic retrieval failed, using positional fallback: %s", manual_id, exc)
+
+    # Only reach here if embedding/retrieval completely failed
+    return _to_chunk_dicts(embedded[:10])
 
 
 def _to_chunk_dicts(embedded: list[dict]) -> list[dict]:

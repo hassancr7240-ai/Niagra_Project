@@ -54,23 +54,32 @@ class Settings(BaseSettings):
     # ── AI Provider ───────────────────────────────────────────────────────────
     ai_provider: str = "openai"  # openai | watsonx  — override with AI_PROVIDER=watsonx in .env
     openai_api_key: Optional[str] = None
+    # Override to point the "openai" provider at an OpenAI-compatible server instead
+    # of api.openai.com — e.g. a local Ollama instance serving IBM Granite models:
+    #   AI_PROVIDER=openai
+    #   OPENAI_BASE_URL=http://localhost:11434/v1
+    #   OPENAI_API_KEY=ollama                       (any non-empty value, Ollama ignores it)
+    #   OPENAI_MODEL_GENERATION=granite3.3:8b
+    #   OPENAI_MODEL_CLASSIFICATION=granite3.3:8b
+    #   OPENAI_EMBEDDING_MODEL=granite-embedding:latest
+    openai_base_url: Optional[str] = None
     openai_model_generation: str = "gpt-4o"
     openai_model_classification: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_embedding_dims: int = 3072
 
-    # IBM watsonx.ai — exact model IDs from the Data Flow Diagram
-    # Classification:  granite-13b-instruct-v2  → detect machine type + analyse PM patterns
-    # Embedding:       bge-large-en-v1.5        → 1024 dims → Azure AI Search
-    # Generation:      granite-3b-code-instruct → extract structured JSON tasks
-    # Analytics:       granite-13b-instruct-v2  → predict next PM due, analyse overdue patterns
+    # IBM watsonx.ai — verified model IDs (confirmed available in us-south deployment)
+    # Chat + Analytics + Classification: ibm/granite-3-8b-instruct
+    # Code/Task Extraction:              ibm/granite-8b-code-instruct
+    # Embedding:                         ibm/slate-125m-english-rtrvr-v2  (1024 dims)
     watsonx_api_key: Optional[str] = None
     watsonx_project_id: Optional[str] = None
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"
-    watsonx_model_generation: str = "ibm/granite-3b-code-instruct"
-    watsonx_model_classification: str = "ibm/granite-13b-instruct-v2"
-    watsonx_model_analytics: str = "ibm/granite-13b-instruct-v2"
-    watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr"
+    watsonx_model_generation: str = "ibm/granite-8b-code-instruct"      # task JSON extraction
+    watsonx_model_classification: str = "ibm/granite-3-8b-instruct"     # PDF manufacturer detect
+    watsonx_model_analytics: str = "ibm/granite-3-8b-instruct"          # chat + analytics
+    watsonx_model_chat: str = "ibm/granite-3-8b-instruct"               # PM chat assistant
+    watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr-v2"   # 1024-dim embeddings
     watsonx_embedding_dims: int = 1024
 
     # ── Azure AI Search ───────────────────────────────────────────────────────

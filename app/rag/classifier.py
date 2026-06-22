@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Optional
 
 from app.config import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -122,7 +124,7 @@ async def _ai_classify_openai(sample_text: str) -> ClassificationResult:
     from openai import AsyncOpenAI
     import json
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     truncated = sample_text[:4000]
 
     prompt = f"""You are a technical document classifier for industrial machinery manuals.

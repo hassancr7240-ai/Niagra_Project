@@ -49,14 +49,12 @@ async def lifespan(app: FastAPI):
     from app.core.pm_library import seed_from_json
 
     async with get_db_session() as db:
-        from app.db.crud import get_all_machines
-        machines_in_db = await get_all_machines(db)
-        if not machines_in_db:
-            logger.info("PM Library empty — seeding from pm_library.json")
-            counts = await seed_from_json(db)
-            logger.info("Seeded: %s", counts)
+        logger.info("Running idempotent PM Library seed (adds any missing machines/intervals/tasks)")
+        counts = await seed_from_json(db)
+        if any(counts.values()):
+            logger.info("Seeded new records: %s", counts)
         else:
-            logger.info("PM Library already seeded (%d machines)", len(machines_in_db))
+            logger.info("PM Library up to date — no new records needed")
 
     logger.info("PM Automation System ready")
     yield

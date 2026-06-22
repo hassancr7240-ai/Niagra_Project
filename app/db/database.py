@@ -26,7 +26,9 @@ _async_url = _build_async_url(_sync_url)
 
 _connect_args: dict = {}
 if "sqlite" in _async_url:
-    _connect_args = {"check_same_thread": False}
+    # timeout=60: aiosqlite waits up to 60s for a write lock (sqlite3.connect timeout param)
+    # check_same_thread=False: required for async usage across tasks
+    _connect_args = {"check_same_thread": False, "timeout": 60}
 
 engine = create_async_engine(
     _async_url,
@@ -70,6 +72,11 @@ async def create_tables() -> None:
     from app.db.models import Base
 
     async with engine.begin() as conn:
+        # WAL mode: allows concurrent readers while one writer is active
+        if "sqlite" in _async_url:
+            await conn.execute(__import__("sqlalchemy", fromlist=["text"]).text("PRAGMA journal_mode=WAL"))
+            await conn.execute(__import__("sqlalchemy", fromlist=["text"]).text("PRAGMA synchronous=NORMAL"))
+            await conn.execute(__import__("sqlalchemy", fromlist=["text"]).text("PRAGMA busy_timeout=30000"))
         await conn.run_sync(Base.metadata.create_all)
 
 

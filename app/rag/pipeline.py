@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -107,6 +108,15 @@ async def run_pipeline(
             interval_hints=interval_hints,
         )
 
+        # Step 8b: Fallback — if AI returned 0 tasks, try direct table
+        # extraction from the PDF (handles PMRSPL-style tabular manuals
+        # like Tetra Pak where the small AI model can't parse the format)
+        if not extracted_tasks:
+            logger.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
+            extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
+            if extracted_tasks:
+                logger.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+
         # Step 9: Validate JSON schema
         results["extracted_tasks"] = extracted_tasks
         results["status"] = "PENDING_REVIEW"
@@ -186,3 +196,134 @@ def _guess_intervals(manufacturer: str) -> list[int]:
     if manufacturer == "KRONES":
         return [8, 120, 500, 1500, 3000, 6000]
     return [8, 240, 500, 1500]
+
+
+_GENERIC_WORDS = frozenset({
+    "the", "this", "that", "for", "and", "machine", "manual", "generate",
+    "check", "maintenance", "preventive", "tasks", "service",
+})
+
+
+def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
+    """
+    Fallback extractor: parse structured PM tables directly from the PDF
+    using pdfplumber table extraction. Handles PMRSPL-style formats
+    (Tetra Pak, etc.) where columns contain component ID, description,
+    interval hours, action (Check/Change), and spare part info.
+    """
+    import pdfplumber
+
+    all_rows: list[list] = []
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page in pdf.pages:
+                text = (page.extract_text() or "")
+                if not re.search(r"\d{3,6}\s+(Check|Change)\s+", text):
+                    continue
+                for table in page.extract_tables():
+                    for row in table:
+                        if row and len(row) >= 11:
+                            all_rows.append(row)
+    except Exception as exc:
+        logger.error("Table extraction failed for %s: %s", pdf_path.name, exc)
+        return []
+
+    if not all_rows:
+        return []
+
+    tasks: list[dict] = []
+    seen: set[str] = set()
+    task_no = 10
+    valid_actions = {"LOCKOUT", "CHECK", "LISTEN", "CLEAN", "REPLACE", "LUBRICATE",
+                     "VERIFY", "TEST", "CONFIRM", "INSPECT"}
+
+    for row in all_rows:
+        try:
+            comp_type = (row[4] or "").strip()
+            comp_desc = (row[5] or "").strip()[:80]
+            interval_str = (row[8] or "").strip()
+            action = (row[9] or "").strip()
+            action_desc = (row[10] or "").strip()
+            spare_pn = (row[11] or "").strip() if len(row) > 11 else ""
+            spare_desc = " ".join(
+                filter(None, [str(row[i] or "").strip() for i in range(12, min(15, len(row)))])
+            )
+
+            if not interval_str or action not in ("Check", "Change"):
+                continue
+
+            interval = int(interval_str)
+
+            if action == "Check":
+                desc = f"{action_desc.upper()} - {comp_type.upper()} {comp_desc.upper()}"
+            else:
+                desc = f"CHANGE {action_desc.upper()} - {comp_type.upper()} {comp_desc.upper()}"
+                if spare_pn:
+                    desc += f" [PART: {spare_pn} {spare_desc}]".upper()
+
+            desc = re.sub(r"\s+", " ", desc).strip()[:200]
+
+            key = f"{interval}|{action}|{row[1] or ''}|{action_desc}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            ct = comp_type.lower()
+            if "valve" in ct:
+                area = "VALVES"
+            elif "filter" in ct or "cartridge" in ct:
+                area = "FILTERS"
+            elif "sensor" in ct or "transmitter" in ct:
+                area = "SENSORS"
+            elif "silencer" in ct:
+                area = "SILENCERS"
+            elif "gasket" in ct or "seal" in ct:
+                area = "SEALS"
+            elif "switch" in ct:
+                area = "SWITCHES"
+            else:
+                area = comp_type.upper()[:20] or "GENERAL"
+
+            action_verb = "CHECK" if action == "Check" else "REPLACE"
+
+            tasks.append({
+                "task_no": task_no,
+                "area": area,
+                "action": action_verb,
+                "description": desc,
+                "machine_state": "STOPPED",
+                "safety_flag": False,
+                "part_number": spare_pn if spare_pn else None,
+                "interval_hours": interval,
+            })
+            task_no += 10
+
+        except (ValueError, IndexError):
+            continue
+
+    # Consolidate duplicates (same action on same component type at same interval)
+    consolidated: dict[tuple, dict] = {}
+    for t in tasks:
+        core = re.sub(r"\b[A-Z]{1,3}\d{2,3}_\d+\b", "", t["description"])
+        core = re.sub(r"\s+", " ", core).strip()[:120]
+        key = (t["interval_hours"], t["action"], t["area"], core)
+        if key not in consolidated:
+            consolidated[key] = {**t, "_count": 1}
+        else:
+            consolidated[key]["_count"] += 1
+
+    final: list[dict] = []
+    task_no = 10
+    for key, g in sorted(consolidated.items(), key=lambda x: (x[0][0], x[0][2], x[0][1])):
+        desc = g["description"]
+        if g["_count"] > 1:
+            desc = f"{desc} ({g['_count']} LOCATIONS)"
+        g["task_no"] = task_no
+        g["description"] = desc[:200]
+        del g["_count"]
+        final.append(g)
+        task_no += 10
+
+    logger.info("Table fallback: %d raw → %d consolidated tasks from %s",
+                len(tasks), len(final), pdf_path.name)
+    return final

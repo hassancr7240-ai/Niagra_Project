@@ -200,7 +200,14 @@ def _format_manual_document_reply(result: dict) -> str:
     )
 
 
-_WORD_RE = re.compile(r"[a-z0-9]{4,}")
+_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_GENERIC_WORDS = frozenset({
+    "the", "this", "that", "for", "and", "with", "from", "machine", "manual",
+    "generate", "create", "make", "give", "checklist", "checlist", "cheklist",
+    "check", "list", "pdf", "xlsx", "excel", "word", "download", "all",
+    "hours", "hour", "operating", "complete", "maintenance", "preventive",
+    "tasks", "steps", "procedure", "service",
+})
 
 
 async def _resolve_manual_id(db, message: str, current_manual_id: Optional[str]) -> Optional[str]:
@@ -219,18 +226,22 @@ async def _resolve_manual_id(db, message: str, current_manual_id: Optional[str])
 
     best_match: Optional[str] = None
     best_score = 0
+    current_score = 0
     for u in ready:
         tokens = set(_WORD_RE.findall(Path(u.original_filename).stem.lower()))
         if u.detected_manufacturer:
             tokens.update(_WORD_RE.findall(u.detected_manufacturer.lower()))
         if u.machine_id:
             tokens.update(_WORD_RE.findall(u.machine_id.lower()))
+        tokens -= _GENERIC_WORDS
         score = sum(1 for t in tokens if t in low)
+        if u.manual_id == current_manual_id:
+            current_score = score
         if score > best_score:
             best_score = score
             best_match = u.manual_id
 
-    if best_match and best_match != current_manual_id:
+    if best_match and best_match != current_manual_id and best_score > current_score:
         return best_match
     return current_manual_id
 

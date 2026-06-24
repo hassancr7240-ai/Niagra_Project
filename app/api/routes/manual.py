@@ -438,6 +438,16 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         model=classification.model,
         interval_hints=interval_hints,
     )
+
+    # Fallback: if AI returned 0 tasks, try direct table extraction from the
+    # PDF (handles PMRSPL-style tabular manuals like Tetra Pak)
+    if not extracted_tasks:
+        log.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
+        from app.rag.pipeline import _extract_tasks_from_pdf_tables
+        extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
+        if extracted_tasks:
+            log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+
     log.info("[%s] Extracted %d tasks — writing to DB", manual_id, len(extracted_tasks))
 
     finalize_fn(

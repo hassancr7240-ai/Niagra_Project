@@ -30,21 +30,22 @@ _TASK_SCHEMA = {
 
 _SYSTEM_PROMPT = """You are an expert industrial maintenance engineer extracting PM tasks from machine manuals.
 
-Extract ALL maintenance tasks from the provided text. For each task output:
+Extract ONLY tasks that are explicitly stated in the manual text. Do NOT invent or hallucinate tasks.
+
+For each task output:
 - task_no: task number (start at 10, increment by 10)
-- area: component/area category in CAPITALS (e.g. SAFETY, INSPECT, CLEAN, LUBRICATE, REPLACE)
-- action: verb in CAPITALS (LOCKOUT, CHECK, CLEAN, REPLACE, LUBRICATE, VERIFY, TEST, CONFIRM)
-- description: full task instruction in CAPITAL LETTERS, detailed enough for a trained technician
+- area: component/area category in CAPITALS (e.g. CONVEYOR, DRIVE SYSTEM, ELECTRICAL, FILTER, LUBRICATION, SAFETY, SENSORS)
+- action: verb in CAPITALS (LOCKOUT, CHECK, CLEAN, REPLACE, LUBRICATE, VERIFY, TEST, CONFIRM, INSPECT)
+- description: full task instruction in CAPITAL LETTERS, include specific details from the manual (part numbers, lubricant types, torque specs, measurements)
 - machine_state: RUNNING (machine producing) | STOPPED (stopped, still powered) | POWERED_OFF (fully isolated)
 - safety_flag: true if task involves LOTO, E-STOP, power isolation, or entering danger zone
-- part_number: exact part number if task involves replacing a consumable, else null
-- interval_hours: maintenance interval in hours (convert calendar time: 1 day=8hr, 1 week=120hr, 2 weeks=240hr, 1 month=500hr, 3 months=1500hr, 6 months=3000hr, 1 year=6000hr)
+- part_number: exact part number if mentioned in the text, else null
+- interval_hours: the EXACT interval from the manual text. Look for phrases like "every X hours", "every X operating hours", "alle X Betriebsstunden". Convert calendar time: 1 day=8hr, 1 week=120hr, 2 weeks=240hr, 1 month=500hr, 3 months=1500hr, 6 months=3000hr, 1 year=6000hr, 7 years=42000hr
 
-IMPORTANT:
+CRITICAL RULES:
+- The interval_hours MUST match what the manual says. If the manual says "every 500 hours", use 500. If it says "every 4000 hours", use 4000. Do NOT default to 8.
 - Every task description must be in CAPITAL LETTERS
-- Start safety/LOTO tasks first
-- Group tasks by machine state (RUNNING first, then STOPPED, then POWERED_OFF)
-- Always end with a GMP return-to-service confirmation task
+- Only extract tasks that have a clear maintenance action (check, inspect, replace, clean, lubricate). Do NOT extract warnings, safety descriptions, or general information.
 - Return ONLY valid JSON array of task objects, no explanation"""
 
 

@@ -551,31 +551,34 @@ def generate_docx(doc: PMDocument, output_path: Path) -> Path:
 
 # ─── XLSX generator ───────────────────────────────────────────────────────────
 # Matches the Niagara/Krones "Asset Activity" Excel template exactly:
-#   Row 1: Asset Activity header row
-#   Row 3: Column headers — Task | Function / Area | Action | Initial
-#   Row 4+: Task data (task_no, area, description)
-#   Parts table, sign-off fields, END OF REPORT footer
+#   Separate tab per PM interval (e.g. "500hr (Monthly)", "6000hr (Annual)")
+#   Each tab: Row 1 Asset Activity header, Row 3 column headers, tasks, parts,
+#   sign-off fields, END OF REPORT footer
 
-def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
+_INTERVAL_LABELS = {
+    8: "8hr (Daily)", 100: "100hr (2-Week)", 120: "120hr (2-Week)",
+    240: "240hr (Monthly)", 500: "500hr (Monthly)", 1000: "1000hr (2-Month)",
+    1500: "1500hr (Quarterly)", 3000: "3000hr (6-Month)", 4000: "4000hr (6-Month)",
+    6000: "6000hr (Annual)", 12000: "12000hr (2-Year)", 18000: "18000hr (3-Year)",
+    30000: "30000hr (5-Year)", 42000: "42000hr (7-Year)", 45000: "45000hr",
+}
 
-    sheet_title = f"{doc.machine_name} {doc.interval_label} PM"
-    ws.title = sheet_title[:31]
 
+def _xlsx_interval_label(hours: int) -> str:
+    return _INTERVAL_LABELS.get(hours, f"{hours}hr")
+
+
+def _write_xlsx_sheet(ws, machine_name: str, interval_label: str, tasks: list) -> None:
+    """Write one interval tab in the Niagara Asset Activity template format."""
     thin = Border(
         left=Side(style="thin"), right=Side(style="thin"),
         top=Side(style="thin"), bottom=Side(style="thin"),
     )
     bold_font = Font(name="Arial", bold=True, size=10)
     body_font = Font(name="Arial", size=10)
-    header_font = Font(name="Arial", bold=True, size=10)
 
-    asset_label = f"{doc.machine_name.upper()} {doc.interval_label.upper()} PM"
+    asset_label = f"{machine_name.upper()} {interval_label.upper()} PM"
 
-    # Column widths: A=8, B-D=12 each (Function/Area), E-I=16 each (Action), J-K=10 each (Initial)
     ws.column_dimensions["A"].width = 8
     for c in ["B", "C", "D"]:
         ws.column_dimensions[c].width = 12
@@ -584,57 +587,45 @@ def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
     for c in ["J", "K"]:
         ws.column_dimensions[c].width = 10
 
-    # ── Row 1: Asset Activity header ─────────────────────────────────────────
+    # Row 1: Asset Activity header
     ws.cell(row=1, column=1, value="Asset\n  Activity:").font = bold_font
     ws.cell(row=1, column=1).alignment = Alignment(wrap_text=True, vertical="center")
     ws.cell(row=1, column=1).border = thin
-
     ws.merge_cells("B1:C1")
     ws.cell(row=1, column=2, value=asset_label).font = bold_font
     ws.cell(row=1, column=2).border = thin
-
     ws.cell(row=1, column=4, value="Description:").font = bold_font
     ws.cell(row=1, column=4).border = thin
-
     ws.merge_cells("E1:H1")
     ws.cell(row=1, column=5, value=asset_label).font = bold_font
     ws.cell(row=1, column=5).border = thin
 
-    ws.row_dimensions[1].height = 20
-
-    # ── Row 2: empty ─────────────────────────────────────────────────────────
-
-    # ── Row 3: Column headers ────────────────────────────────────────────────
+    # Row 3: Column headers
     r = 3
-    ws.cell(row=r, column=1, value="Task").font = header_font
+    ws.cell(row=r, column=1, value="Task").font = bold_font
     ws.cell(row=r, column=1).border = thin
-
     ws.merge_cells(f"B{r}:D{r}")
-    ws.cell(row=r, column=2, value="Function / Area").font = header_font
+    ws.cell(row=r, column=2, value="Function / Area").font = bold_font
     ws.cell(row=r, column=2).border = thin
-
     ws.merge_cells(f"E{r}:I{r}")
-    ws.cell(row=r, column=5, value="Action").font = header_font
+    ws.cell(row=r, column=5, value="Action").font = bold_font
     ws.cell(row=r, column=5).border = thin
-
     ws.merge_cells(f"J{r}:K{r}")
-    ws.cell(row=r, column=10, value="Initial").font = header_font
+    ws.cell(row=r, column=10, value="Initial").font = bold_font
     ws.cell(row=r, column=10).border = thin
 
-    # ── Task rows (starting row 4) ──────────────────────────────────────────
+    # Task rows
     row_idx = 4
-    for task in sorted(doc.tasks, key=lambda x: x.task_no):
-        # Task number
-        ws.cell(row=row_idx, column=1, value=task.task_no).font = body_font
+    task_no = 10
+    for task in tasks:
+        ws.cell(row=row_idx, column=1, value=task_no).font = body_font
         ws.cell(row=row_idx, column=1).border = thin
         ws.cell(row=row_idx, column=1).alignment = Alignment(horizontal="right")
 
-        # Function / Area (merged B-D)
         ws.merge_cells(f"B{row_idx}:D{row_idx}")
         ws.cell(row=row_idx, column=2, value=task.area).font = body_font
         ws.cell(row=row_idx, column=2).border = thin
 
-        # Action / Description (merged E-I)
         desc = task.description
         if task.part_number:
             desc += f"  [PART: {task.part_number}]"
@@ -643,60 +634,70 @@ def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
         ws.cell(row=row_idx, column=5).alignment = Alignment(wrap_text=True)
         ws.cell(row=row_idx, column=5).border = thin
 
-        # Initial (merged J-K)
         ws.merge_cells(f"J{row_idx}:K{row_idx}")
         ws.cell(row=row_idx, column=10).border = thin
 
         row_idx += 1
+        task_no += 10
 
-    # ── Parts table ──────────────────────────────────────────────────────────
+    # Parts table
     row_idx += 1
-    parts_hdr_row = row_idx
-
-    parts_headers = [
-        ("A", "B", "Part Number"),
-        ("C", "C", "UOM"),
-        ("D", "E", "Required Qty"),
-        ("F", "F", "Issued Qty"),
-        ("G", "G", "Pick Location"),
-        ("J", "K", "Mechanic"),
-    ]
-    for start_col, end_col, label in parts_headers:
-        if start_col != end_col:
-            ws.merge_cells(f"{start_col}{parts_hdr_row}:{end_col}{parts_hdr_row}")
-        col_num = ord(start_col) - ord("A") + 1
-        cell = ws.cell(row=parts_hdr_row, column=col_num, value=label)
-        cell.font = bold_font
-        cell.border = thin
-
-    # Empty parts rows
+    for sc, ec, label in [("A","B","Part Number"),("C","C","UOM"),("D","E","Required Qty"),
+                           ("F","F","Issued Qty"),("G","G","Pick Location"),("J","K","Mechanic")]:
+        if sc != ec:
+            ws.merge_cells(f"{sc}{row_idx}:{ec}{row_idx}")
+        col_num = ord(sc) - ord("A") + 1
+        ws.cell(row=row_idx, column=col_num, value=label).font = bold_font
+        ws.cell(row=row_idx, column=col_num).border = thin
     for _ in range(2):
         row_idx += 1
         for c in range(1, 12):
             ws.cell(row=row_idx, column=c).border = thin
 
-    # ── Sign-off fields ──────────────────────────────────────────────────────
+    # Sign-off fields
     row_idx += 2
     ws.merge_cells(f"A{row_idx}:D{row_idx}")
     ws.cell(row=row_idx, column=1,
             value="Actual start date: ___________   Actual end date: ___________   Hours ___________").font = body_font
-
     row_idx += 1
     ws.merge_cells(f"A{row_idx}:D{row_idx}")
     ws.cell(row=row_idx, column=1,
             value="Comments & Action: ____________________________________________________").font = body_font
-
     row_idx += 1
     ws.merge_cells(f"A{row_idx}:D{row_idx}")
     ws.cell(row=row_idx, column=1,
             value="Team Member(s): _______________________________________________________").font = body_font
 
-    # ── END OF REPORT ────────────────────────────────────────────────────────
+    # END OF REPORT
     row_idx += 2
     ws.merge_cells(f"A{row_idx}:K{row_idx}")
     ws.cell(row=row_idx, column=1,
             value="**************************** END OF REPORT **************************").font = bold_font
     ws.cell(row=row_idx, column=1).alignment = Alignment(horizontal="center")
+
+
+def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # Group tasks by interval_hours (separate tab per PM frequency)
+    from collections import defaultdict
+    by_interval: dict[int, list] = defaultdict(list)
+    for task in sorted(doc.tasks, key=lambda x: x.task_no):
+        iv = getattr(task, "interval_hours", 0) or 0
+        by_interval[iv].append(task)
+
+    if not by_interval or (len(by_interval) == 1 and 0 in by_interval):
+        # No interval data — single sheet with all tasks
+        ws = wb.create_sheet(title=f"{doc.interval_label} PM"[:31])
+        _write_xlsx_sheet(ws, doc.machine_name, doc.interval_label, doc.tasks)
+    else:
+        for interval in sorted(by_interval.keys()):
+            label = _xlsx_interval_label(interval)
+            ws = wb.create_sheet(title=label[:31])
+            _write_xlsx_sheet(ws, doc.machine_name, label, by_interval[interval])
 
     wb.save(str(output_path))
     return output_path

@@ -29,6 +29,7 @@ class _ExtractedTask:
     machine_state: str
     safety_flag: bool
     part_number: Optional[str]
+    interval_hours: int = 0
 
 
 async def generate_pm_document(
@@ -183,6 +184,7 @@ async def generate_pm_document_from_manual(
             machine_state=t.get("machine_state", "STOPPED"),
             safety_flag=bool(t.get("safety_flag", False)),
             part_number=t.get("part_number"),
+            interval_hours=int(t.get("interval_hours", 0) or 0),
         )
         for i, t in enumerate(raw_tasks)
     ]

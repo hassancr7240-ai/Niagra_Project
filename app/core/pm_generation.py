@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import get_settings
-from app.core.document_generator import PMDocument, generate_docx, generate_pdf, generate_xlsx
+from app.core.document_generator import PMDocument, generate_docx, generate_pdf, generate_xlsx, generate_xlsx_all_intervals
 from app.core.pm_library import extract_parts_from_tasks, get_interval_label
 from app.core.storage_module import upload_file
 from app.db import crud
@@ -278,3 +278,129 @@ async def generate_pm_document_from_manual(
         "output_format": output_format,
         "source_manual": upload.original_filename,
     }
+
+
+async def generate_pm_xlsx_per_interval(
+    db,
+    user,
+    manual_id: str,
+    work_order: Optional[str] = None,
+    technician_name: Optional[str] = None,
+    storage_target: Optional[str] = None,
+) -> list[dict]:
+    """
+    Generate one XLSX file per PM interval from an uploaded manual's extracted tasks.
+    Returns a list of result dicts (one per interval file), empty list if nothing available.
+    """
+    upload = await crud.get_manual_upload(db, manual_id)
+    if not upload or upload.status not in ("PENDING_REVIEW", "APPROVED"):
+        return []
+
+    raw_tasks = json.loads(upload.extracted_tasks or "[]")
+    if not raw_tasks:
+        return []
+
+    tasks = [
+        _ExtractedTask(
+            task_no=t.get("task_no", (i + 1) * 10),
+            area=t.get("area", "GENERAL"),
+            action=t.get("action", "CHECK"),
+            description=t.get("description", ""),
+            machine_state=t.get("machine_state", "STOPPED"),
+            safety_flag=bool(t.get("safety_flag", False)),
+            part_number=t.get("part_number"),
+            interval_hours=int(t.get("interval_hours", 0) or 0),
+        )
+        for i, t in enumerate(raw_tasks)
+    ]
+
+    now = datetime.utcnow()
+    work_order = work_order or f"CHAT-{now.strftime('%Y%m%d%H%M%S')}"
+    technician_name = technician_name or user.name or user.email
+
+    machine_label = upload.machine_id or upload.detected_manufacturer or "EQUIPMENT"
+    machine_id_str = upload.machine_id or f"MANUAL-{manual_id[:8]}"
+
+    pm_doc = PMDocument(
+        machine_name=machine_label,
+        machine_id=machine_id_str,
+        interval_hours=0,
+        interval_label="All Intervals",
+        work_order=work_order,
+        technician_name=technician_name,
+        tasks=tasks,
+        parts=extract_parts_from_tasks(tasks),
+        generated_at=now,
+        watermark_text=now.strftime("%Y-%m-%d %H:%M UTC"),
+        notes=f"Generated from: {upload.original_filename}",
+    )
+
+    results: list[dict] = []
+    used_target = storage_target or settings.default_storage_target
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        interval_files = generate_xlsx_all_intervals(pm_doc, Path(tmp_dir))
+        for file_path, interval_label, interval_hours in interval_files:
+            file_name = file_path.name
+            file_size = file_path.stat().st_size
+            file_hash = compute_file_hash(file_path)
+            used_target, download_url = await upload_file(
+                file_path, machine_id_str, file_name,
+                storage_target or settings.default_storage_target,
+            )
+            record = await crud.create_pm_record(
+                db,
+                {
+                    "machine_id": machine_id_str,
+                    "interval_hours": interval_hours,
+                    "work_order": work_order,
+                    "technician_name": technician_name,
+                    "technician_id": user.user_id,
+                    "status": "COMPLETED",
+                    "started_at": now,
+                    "completed_at": now,
+                    "storage_target": used_target,
+                    "blob_url": download_url,
+                    "file_name": file_name,
+                    "file_hash": file_hash,
+                    "file_size_bytes": file_size,
+                    "notes": f"Generated from: {upload.original_filename}",
+                },
+            )
+            task_count = sum(
+                1 for t in tasks if getattr(t, "interval_hours", 0) == interval_hours
+            )
+            results.append({
+                "record_id": record.record_id,
+                "machine_id": machine_id_str,
+                "machine_name": machine_label,
+                "interval_hours": interval_hours,
+                "interval_label": interval_label,
+                "file_name": file_name,
+                "file_size_bytes": file_size,
+                "download_url": download_url,
+                "task_count": task_count,
+                "source_manual": upload.original_filename,
+            })
+
+    if results:
+        await log_action(
+            db,
+            action="PM_GENERATED",
+            user_id=user.user_id,
+            user_email=user.email,
+            resource_type="manual_upload",
+            resource_id=manual_id,
+            details={
+                "manual_id": manual_id,
+                "machine_id": machine_id_str,
+                "work_order": work_order,
+                "file_count": len(results),
+                "format": "xlsx",
+                "storage_target": used_target,
+                "source": "xlsx_per_interval",
+            },
+            ip_address=getattr(user, "ip_address", None),
+        )
+
+    return results

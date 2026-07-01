@@ -310,6 +310,44 @@ async def approve_extracted_tasks(
     }
 
 
+@router.post("/uploads/{manual_id}/generate-xlsx", response_model=dict)
+async def generate_xlsx_per_interval(
+    manual_id: str,
+    user: CurrentUserDep,
+    db: DBDep,
+) -> dict:
+    """
+    POST /api/manual/uploads/{manual_id}/generate-xlsx
+    Generate one XLSX file per PM interval from a processed manual's extracted tasks.
+    Returns download links for each interval file.
+    """
+    user.require("manual:upload")
+
+    from app.core.pm_generation import generate_pm_xlsx_per_interval as _gen
+
+    docs = await _gen(db, user, manual_id)
+    if not docs:
+        upload = await crud.get_manual_upload(db, manual_id)
+        if not upload:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+        if upload.status not in ("PENDING_REVIEW", "APPROVED"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Manual is not ready (status: {upload.status}). Wait for pipeline to complete.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No extracted tasks found in this manual.",
+        )
+
+    return {
+        "manual_id": manual_id,
+        "file_count": len(docs),
+        "total_tasks": sum(d["task_count"] for d in docs),
+        "files": docs,
+    }
+
+
 async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
     """
     Background task wrapper.

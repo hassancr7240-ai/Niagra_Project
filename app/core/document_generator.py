@@ -568,6 +568,20 @@ def _xlsx_interval_label(hours: int) -> str:
     return _INTERVAL_LABELS.get(hours, f"{hours}hr")
 
 
+# File-safe label for filenames (no spaces/parens)
+_INTERVAL_FILE_LABELS = {
+    8: "8hr_Daily", 100: "100hr_2-Week", 120: "120hr_2-Week",
+    240: "240hr_Monthly", 500: "500hr_Monthly", 1000: "1000hr_2-Month",
+    1500: "1500hr_Quarterly", 3000: "3000hr_6-Month", 4000: "4000hr_6-Month",
+    6000: "6000hr_Annual", 12000: "12000hr_2-Year", 18000: "18000hr_3-Year",
+    30000: "30000hr_5-Year", 42000: "42000hr_7-Year", 45000: "45000hr",
+}
+
+
+def _xlsx_file_label(hours: int) -> str:
+    return _INTERVAL_FILE_LABELS.get(hours, f"{hours}hr")
+
+
 def _write_xlsx_sheet(ws, machine_name: str, interval_label: str, tasks: list) -> None:
     """Write one interval tab in the Niagara Asset Activity template format."""
     thin = Border(
@@ -701,3 +715,52 @@ def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
 
     wb.save(str(output_path))
     return output_path
+
+
+def generate_xlsx_all_intervals(doc: PMDocument, output_dir: Path) -> list[tuple[Path, str, int]]:
+    """
+    Generate one XLSX file per PM interval in output_dir.
+    Returns list of (file_path, interval_label, interval_hours) tuples, sorted by interval.
+    Each file matches the Niagara Asset Activity template exactly.
+    """
+    from collections import defaultdict
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    by_interval: dict[int, list] = defaultdict(list)
+    for task in sorted(doc.tasks, key=lambda x: getattr(x, "task_no", 0)):
+        iv = getattr(task, "interval_hours", 0) or 0
+        by_interval[iv].append(task)
+
+    safe_machine = (
+        doc.machine_id.replace(" ", "_").replace("-", "_")
+        .replace(".", "").replace("/", "_").upper()
+    )
+
+    if not by_interval or (len(by_interval) == 1 and 0 in by_interval):
+        label = _xlsx_interval_label(doc.interval_hours or 0)
+        file_label = _xlsx_file_label(doc.interval_hours or 0)
+        file_name = f"PM_{safe_machine}_{file_label}.xlsx"
+        out_path = output_dir / file_name
+        wb = Workbook()
+        ws = wb.active
+        ws.title = label[:31]
+        _write_xlsx_sheet(ws, doc.machine_name, label, doc.tasks)
+        wb.save(str(out_path))
+        return [(out_path, label, doc.interval_hours or 0)]
+
+    results = []
+    for interval in sorted(by_interval.keys()):
+        label = _xlsx_interval_label(interval)
+        file_label = _xlsx_file_label(interval)
+        file_name = f"PM_{safe_machine}_{file_label}.xlsx"
+        out_path = output_dir / file_name
+        wb = Workbook()
+        ws = wb.active
+        ws.title = label[:31]
+        _write_xlsx_sheet(ws, doc.machine_name, label, by_interval[interval])
+        wb.save(str(out_path))
+        results.append((out_path, label, interval))
+
+    return results

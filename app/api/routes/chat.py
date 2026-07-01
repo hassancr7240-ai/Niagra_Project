@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.core.pm_generation import generate_pm_document, generate_pm_document_from_manual
+from app.core.pm_generation import generate_pm_document, generate_pm_document_from_manual, generate_pm_xlsx_per_interval
 from app.db import crud
 from app.db.models import ChatMessage, ChatSession, Machine, Task
 from app.dependencies import CurrentUserDep, DBDep
@@ -198,6 +198,25 @@ def _format_manual_document_reply(result: dict) -> str:
         f"- Format: {result['output_format'].upper()} ({size_kb:.1f} KB)\n\n"
         f"[⬇ Download {result['file_name']}]({result['download_url']})"
     )
+
+
+def _format_xlsx_per_interval_reply(docs: list[dict]) -> str:
+    if not docs:
+        return "No tasks found in this manual."
+    source = docs[0]["source_manual"]
+    machine_name = docs[0]["machine_name"]
+    total_tasks = sum(d["task_count"] for d in docs)
+    count = len(docs)
+    lines = [
+        f"✅ **Generated {count} PM checklist{'s' if count > 1 else ''} from {source}**\n",
+        f"Machine: **{machine_name}** — {total_tasks} tasks across {count} interval{'s' if count > 1 else ''}\n",
+    ]
+    for d in docs:
+        size_kb = d["file_size_bytes"] / 1024
+        lines.append(
+            f"- [⬇ {d['interval_label']} PM — {d['task_count']} tasks ({size_kb:.0f} KB)]({d['download_url']})"
+        )
+    return "\n".join(lines)
 
 
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
@@ -531,21 +550,19 @@ async def send_message(
         # ── PDF mode: answer from the uploaded manual ─────────────────────────
         has_document = False
 
-        # If the user is asking for a checklist/document, generate a real
-        # PDF/XLSX/DOCX from the AI-extracted tasks for THIS manual (same
-        # GMP template as the PM Library export).
+        # If the user is asking for a checklist/document, generate separate
+        # XLSX files per PM interval from the AI-extracted tasks for this manual.
         if is_checklist:
-            # If the message names a different machine than the one currently
-            # attached (e.g. "checklist for the variopac" while the Dehumidifier
-            # manual is active), redirect to the matching uploaded manual.
+            # Redirect to the manual matching the message if the user named
+            # a different machine (e.g. "checklist for variopac" while
+            # Dehumidifier manual is active).
             manual_id = await _resolve_manual_id(db, message, manual_id)
-            output_format = _detect_format(message)
-            doc = await generate_pm_document_from_manual(db, user, manual_id, output_format=output_format)
-            if doc:
-                reply = _format_manual_document_reply(doc)
+            docs = await generate_pm_xlsx_per_interval(db, user, manual_id)
+            if docs:
+                reply = _format_xlsx_per_interval_reply(docs)
                 is_checklist = False
                 has_document = True
-                download_url = doc["download_url"]
+                download_url = docs[0]["download_url"]
 
         if not has_document:
             rag_context = await _retrieve_context(message, effective_machine, manual_id=manual_id)

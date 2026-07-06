@@ -193,9 +193,16 @@ def _to_chunk_dicts(embedded: list[dict]) -> list[dict]:
 
 
 def _guess_intervals(manufacturer: str) -> list[int]:
-    if manufacturer == "KRONES":
-        return [8, 120, 500, 1500, 3000, 6000]
-    return [8, 240, 500, 1500]
+    """Return likely PM intervals (hours) based on manufacturer type."""
+    mfr = (manufacturer or "").upper()
+    if any(k in mfr for k in ("KRONES", "VARIOPAC", "CONTIFORM", "SHRINK")):
+        return [100, 120, 500, 1000, 1500, 3000, 4000, 6000, 30000]
+    if any(k in mfr for k in ("TETRA", "TEM", "PMRSPL")):
+        return [3000, 6000, 12000, 18000]
+    if any(k in mfr for k in ("EISBAR", "DEHUMID")):
+        return [500, 42000, 45000]
+    # Generic fallback — broad set covering most industrial equipment
+    return [8, 100, 120, 240, 500, 1000, 1500, 3000, 6000, 12000]
 
 
 _GENERIC_WORDS = frozenset({
@@ -206,124 +213,311 @@ _GENERIC_WORDS = frozenset({
 
 def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
     """
-    Fallback extractor: parse structured PM tables directly from the PDF
-    using pdfplumber table extraction. Handles PMRSPL-style formats
-    (Tetra Pak, etc.) where columns contain component ID, description,
-    interval hours, action (Check/Change), and spare part info.
+    Generalized fallback extractor: parse PM tables from any PDF format.
+
+    Strategy (tried in order):
+      1. PMRSPL/Tetra Pak style — header-row column detection
+      2. Generic interval table — any table with a numeric interval column
+         and an action/description column
+      3. Text-pattern fallback — regex over page text for "Xh / every X hours"
+         maintenance bullets (handles German/English narrative manuals)
     """
     import pdfplumber
 
-    all_rows: list[list] = []
+    tasks: list[dict] = []
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
-            for page in pdf.pages:
-                text = (page.extract_text() or "")
-                if not re.search(r"\d{3,6}\s+(Check|Change)\s+", text):
-                    continue
-                for table in page.extract_tables():
-                    for row in table:
-                        if row and len(row) >= 11:
-                            all_rows.append(row)
+            tasks = _try_header_table(pdf, pdf_path)
+            if not tasks:
+                tasks = _try_generic_table(pdf, pdf_path)
+            if not tasks:
+                tasks = _try_text_patterns(pdf, pdf_path)
     except Exception as exc:
         logger.error("Table extraction failed for %s: %s", pdf_path.name, exc)
-        return []
 
-    if not all_rows:
-        return []
+    logger.info("Generalized fallback: %d tasks from %s", len(tasks), pdf_path.name)
+    return tasks
 
-    tasks: list[dict] = []
-    seen: set[str] = set()
-    task_no = 10
-    valid_actions = {"LOCKOUT", "CHECK", "LISTEN", "CLEAN", "REPLACE", "LUBRICATE",
-                     "VERIFY", "TEST", "CONFIRM", "INSPECT"}
 
-    for row in all_rows:
-        try:
-            comp_type = (row[4] or "").strip()
-            comp_desc = (row[5] or "").strip()[:80]
-            interval_str = (row[8] or "").strip()
-            action = (row[9] or "").strip()
-            action_desc = (row[10] or "").strip()
-            spare_pn = (row[11] or "").strip() if len(row) > 11 else ""
-            spare_desc = " ".join(
-                filter(None, [str(row[i] or "").strip() for i in range(12, min(15, len(row)))])
-            )
+# ── Column-header keywords ────────────────────────────────────────────────────
 
-            if not interval_str or action not in ("Check", "Change"):
-                continue
+_INTERVAL_HEADERS = {"interval", "intervall", "frequency", "frequenz", "cycle",
+                     "hours", "stunden", "hrs", "period"}
+_ACTION_HEADERS   = {"action", "aktion", "work", "task", "operation", "activity",
+                     "maintenance", "wartung"}
+_DESC_HEADERS     = {"description", "beschreibung", "detail", "instruction",
+                     "specification", "work description", "comment", "remarks"}
+_AREA_HEADERS     = {"component", "area", "system", "location", "part",
+                     "equipment", "assembly", "group", "bauteil"}
 
-            interval = int(interval_str)
+_AREA_MAP = {
+    "valve": "VALVES", "filter": "FILTERS", "cartridge": "FILTERS",
+    "sensor": "SENSORS", "transmitter": "SENSORS", "probe": "SENSORS",
+    "pump": "PUMP", "motor": "MOTOR", "belt": "DRIVE SYSTEM",
+    "chain": "DRIVE SYSTEM", "bearing": "BEARINGS", "seal": "SEALS",
+    "gasket": "SEALS", "lubric": "LUBRICATION", "oil": "LUBRICATION",
+    "grease": "LUBRICATION", "silencer": "SILENCERS", "switch": "SWITCHES",
+    "electrical": "ELECTRICAL", "cable": "ELECTRICAL", "conveyor": "CONVEYOR",
+    "safety": "SAFETY", "guard": "SAFETY", "loto": "SAFETY",
+}
 
-            if action == "Check":
-                desc = f"{action_desc.upper()} - {comp_type.upper()} {comp_desc.upper()}"
-            else:
-                desc = f"CHANGE {action_desc.upper()} - {comp_type.upper()} {comp_desc.upper()}"
-                if spare_pn:
-                    desc += f" [PART: {spare_pn} {spare_desc}]".upper()
+_ACTION_VERB_MAP = {
+    "check": "CHECK", "inspect": "INSPECT", "verify": "VERIFY",
+    "test": "TEST", "confirm": "CONFIRM",
+    "change": "REPLACE", "replace": "REPLACE", "renew": "REPLACE",
+    "clean": "CLEAN", "flush": "CLEAN",
+    "lubricate": "LUBRICATE", "grease": "LUBRICATE", "oil": "LUBRICATE",
+    "tighten": "CHECK", "adjust": "CHECK", "calibrate": "VERIFY",
+}
 
-            desc = re.sub(r"\s+", " ", desc).strip()[:200]
+_NON_PM_PATTERNS = re.compile(
+    r"warning sign|safety sign|label|sticker|decal|notice board|placard",
+    re.IGNORECASE,
+)
 
-            key = f"{interval}|{action}|{row[1] or ''}|{action_desc}"
-            if key in seen:
-                continue
-            seen.add(key)
+# Known valid PM intervals (hours)
+_VALID_INTERVALS = {
+    8, 40, 100, 120, 240, 250, 500, 750, 1000, 1500, 2000, 2500,
+    3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000, 18000,
+    20000, 24000, 30000, 36000, 42000, 45000,
+}
 
-            ct = comp_type.lower()
-            if "valve" in ct:
-                area = "VALVES"
-            elif "filter" in ct or "cartridge" in ct:
-                area = "FILTERS"
-            elif "sensor" in ct or "transmitter" in ct:
-                area = "SENSORS"
-            elif "silencer" in ct:
-                area = "SILENCERS"
-            elif "gasket" in ct or "seal" in ct:
-                area = "SEALS"
-            elif "switch" in ct:
-                area = "SWITCHES"
-            else:
-                area = comp_type.upper()[:20] or "GENERAL"
 
-            action_verb = "CHECK" if action == "Check" else "REPLACE"
+def _detect_area(text: str) -> str:
+    low = text.lower()
+    for kw, area in _AREA_MAP.items():
+        if kw in low:
+            return area
+    return "GENERAL"
 
-            tasks.append({
-                "task_no": task_no,
-                "area": area,
-                "action": action_verb,
-                "description": desc,
-                "machine_state": "STOPPED",
-                "safety_flag": False,
-                "part_number": spare_pn if spare_pn else None,
-                "interval_hours": interval,
-            })
-            task_no += 10
 
-        except (ValueError, IndexError):
+def _detect_action_verb(text: str) -> str:
+    low = text.lower()
+    for kw, verb in _ACTION_VERB_MAP.items():
+        if kw in low:
+            return verb
+    return "CHECK"
+
+
+def _snap_interval(hours: int) -> int:
+    """Round a raw hour value to the nearest known PM interval."""
+    closest = min(_VALID_INTERVALS, key=lambda v: abs(v - hours))
+    return closest if abs(closest - hours) / max(hours, 1) < 0.2 else hours
+
+
+def _build_task(task_no: int, area: str, action_verb: str,
+                desc: str, interval: int, part_number: str = "") -> dict:
+    if _NON_PM_PATTERNS.search(desc):
+        return {}
+    return {
+        "task_no": task_no,
+        "area": area,
+        "action": action_verb,
+        "description": re.sub(r"\s+", " ", desc.upper()).strip()[:250],
+        "machine_state": "POWERED_OFF" if "loto" in desc.lower() or "lockout" in desc.lower()
+                         else "STOPPED",
+        "safety_flag": bool(re.search(r"loto|lockout|isolation|danger|warning", desc, re.I)),
+        "part_number": part_number or None,
+        "interval_hours": interval,
+    }
+
+
+def _finalize(raw: list[dict]) -> list[dict]:
+    """Deduplicate by (interval, area, description-prefix) and add task numbers."""
+    seen: dict[tuple, dict] = {}
+    for t in raw:
+        if not t:
             continue
-
-    # Consolidate duplicates (same action on same component type at same interval)
-    consolidated: dict[tuple, dict] = {}
-    for t in tasks:
-        core = re.sub(r"\b[A-Z]{1,3}\d{2,3}_\d+\b", "", t["description"])
-        core = re.sub(r"\s+", " ", core).strip()[:120]
-        key = (t["interval_hours"], t["action"], t["area"], core)
-        if key not in consolidated:
-            consolidated[key] = {**t, "_count": 1}
+        core = t["description"][:100]
+        key = (t["interval_hours"], t["area"], core)
+        if key not in seen:
+            seen[key] = {**t, "_n": 1}
         else:
-            consolidated[key]["_count"] += 1
+            seen[key]["_n"] += 1
 
-    final: list[dict] = []
+    final = []
     task_no = 10
-    for key, g in sorted(consolidated.items(), key=lambda x: (x[0][0], x[0][2], x[0][1])):
-        desc = g["description"]
-        if g["_count"] > 1:
-            desc = f"{desc} ({g['_count']} LOCATIONS)"
+    for key in sorted(seen, key=lambda k: (k[0], k[1], k[2])):
+        g = seen[key]
+        if g["_n"] > 1:
+            g["description"] = f"{g['description']} ({g['_n']} LOCATIONS)"
+        g.pop("_n")
         g["task_no"] = task_no
-        g["description"] = desc[:200]
-        del g["_count"]
         final.append(g)
         task_no += 10
-
-    logger.info("Table fallback: %d raw → %d consolidated tasks from %s",
-                len(tasks), len(final), pdf_path.name)
     return final
+
+
+# ── Strategy 1: header-row column detection ───────────────────────────────────
+
+def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
+    """
+    Scan every table for a header row containing interval/action/description
+    keywords. Once found, use those column indices to parse all subsequent rows.
+    Works for PMRSPL (Tetra Pak), German Krones service lists, etc.
+    """
+    raw: list[dict] = []
+
+    for page in pdf.pages:
+        for table in page.extract_tables():
+            if not table or len(table) < 2:
+                continue
+
+            # Find header row (first row where ≥2 cells match known headers)
+            hdr_idx = None
+            cols: dict[str, int] = {}
+            for ri, row in enumerate(table[:4]):
+                cells = [str(c or "").lower().strip() for c in row]
+                matched = {}
+                for ci, cell in enumerate(cells):
+                    for col_type, headers in [
+                        ("interval", _INTERVAL_HEADERS),
+                        ("action",   _ACTION_HEADERS),
+                        ("desc",     _DESC_HEADERS),
+                        ("area",     _AREA_HEADERS),
+                    ]:
+                        if col_type not in matched and any(h in cell for h in headers):
+                            matched[col_type] = ci
+                if len(matched) >= 2 and ("interval" in matched or "action" in matched):
+                    hdr_idx = ri
+                    cols = matched
+                    break
+
+            if hdr_idx is None:
+                continue
+
+            # Parse data rows after the header
+            for row in table[hdr_idx + 1:]:
+                if not row or all(c is None or str(c).strip() == "" for c in row):
+                    continue
+                try:
+                    interval_raw = str(row[cols["interval"]] or "").strip() if "interval" in cols else ""
+                    action_raw   = str(row[cols.get("action", cols.get("desc", 0))] or "").strip()
+                    desc_raw     = str(row[cols.get("desc", cols.get("action", 0))] or "").strip()
+                    area_raw     = str(row[cols.get("area", 0)] or "").strip() if "area" in cols else ""
+
+                    # Extract numeric interval
+                    m = re.search(r"(\d{2,6})", interval_raw)
+                    if not m:
+                        continue
+                    interval = _snap_interval(int(m.group(1)))
+                    if interval < 8:
+                        continue
+
+                    action_verb = _detect_action_verb(action_raw)
+                    area = _detect_area(area_raw or desc_raw) if not area_raw else area_raw.upper()[:30]
+                    desc = desc_raw or action_raw
+
+                    # Find part number anywhere in the row
+                    pn = ""
+                    for cell in row:
+                        cs = str(cell or "").strip()
+                        if re.match(r"[A-Z0-9][A-Z0-9\-]{4,20}$", cs):
+                            pn = cs
+                            break
+
+                    t = _build_task(0, area, action_verb, desc, interval, pn)
+                    if t:
+                        raw.append(t)
+                except (ValueError, IndexError, TypeError):
+                    continue
+
+    logger.info("Header-table strategy: %d raw tasks from %s", len(raw), pdf_path.name)
+    return _finalize(raw) if raw else []
+
+
+# ── Strategy 2: generic interval table ───────────────────────────────────────
+
+def _try_generic_table(pdf, pdf_path: Path) -> list[dict]:
+    """
+    No header found — scan tables for rows where one cell is a 2–5-digit
+    number in _VALID_INTERVALS range and another cell contains action text.
+    """
+    raw: list[dict] = []
+
+    for page in pdf.pages:
+        for table in page.extract_tables():
+            if not table:
+                continue
+            for row in table:
+                if not row or len(row) < 3:
+                    continue
+                cells = [str(c or "").strip() for c in row]
+                # Find an interval cell
+                interval = None
+                for c in cells:
+                    m = re.match(r"^(\d{2,6})$", c)
+                    if m:
+                        v = int(m.group(1))
+                        snapped = _snap_interval(v)
+                        if snapped in _VALID_INTERVALS and abs(snapped - v) / max(v, 1) < 0.2:
+                            interval = snapped
+                            break
+                if interval is None:
+                    continue
+                # Build description from remaining cells
+                desc_parts = [c for c in cells if c and c != str(interval) and len(c) > 3]
+                if not desc_parts:
+                    continue
+                desc = " - ".join(desc_parts[:4])
+                action_verb = _detect_action_verb(desc)
+                area = _detect_area(desc)
+                pn = next((c for c in cells if re.match(r"[A-Z0-9][A-Z0-9\-]{4,20}$", c)), "")
+                t = _build_task(0, area, action_verb, desc, interval, pn)
+                if t:
+                    raw.append(t)
+
+    logger.info("Generic-table strategy: %d raw tasks from %s", len(raw), pdf_path.name)
+    return _finalize(raw) if raw else []
+
+
+# ── Strategy 3: text-pattern fallback ────────────────────────────────────────
+
+_TEXT_INTERVAL_RE = re.compile(
+    r"(?:every|alle|each|after|nach)\s+(\d{2,6})\s*(?:hours?|hours|hrs?|h\b|"
+    r"betriebsstunden|stunden)\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
+    re.IGNORECASE,
+)
+_BULLET_RE = re.compile(
+    r"(?:^|\n)\s*[•–\-\*]\s*(.{10,200}?)(?=\n|$)",
+    re.IGNORECASE,
+)
+
+
+def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
+    """
+    Last resort: regex-match "every X hours: <task>" patterns in page text.
+    Handles narrative-style manuals (Krones/Eisbar English/German).
+    """
+    raw: list[dict] = []
+    current_interval: int = 0
+
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+
+        # Find interval anchors ("Every 500 hours:")
+        for m in _TEXT_INTERVAL_RE.finditer(text):
+            hrs_raw = int(m.group(1))
+            snapped = _snap_interval(hrs_raw)
+            if snapped not in _VALID_INTERVALS:
+                continue
+            current_interval = snapped
+            task_text = m.group(2).strip()
+            if len(task_text) > 10:
+                t = _build_task(0, _detect_area(task_text),
+                                _detect_action_verb(task_text), task_text, current_interval)
+                if t:
+                    raw.append(t)
+
+        # Collect bullet points under current interval
+        if current_interval:
+            for m in _BULLET_RE.finditer(text):
+                task_text = m.group(1).strip()
+                if len(task_text) > 10:
+                    t = _build_task(0, _detect_area(task_text),
+                                    _detect_action_verb(task_text), task_text, current_interval)
+                    if t:
+                        raw.append(t)
+
+    logger.info("Text-pattern strategy: %d raw tasks from %s", len(raw), pdf_path.name)
+    return _finalize(raw) if raw else []

@@ -469,7 +469,8 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     else:
         top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0), "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")} for e in embedded[:10]]
 
-    interval_hints = [8, 120, 500, 1500, 3000, 6000] if classification.manufacturer == "KRONES" else [8, 240, 500, 1500]
+    from app.rag.pipeline import _guess_intervals
+    interval_hints = _guess_intervals(classification.manufacturer)
     extracted_tasks = await extract_tasks_from_chunks(
         top_chunks,
         manufacturer=classification.manufacturer,

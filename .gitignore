@@ -34,6 +34,23 @@ doc_content.txt
 last_manual_id.txt
 memory/
 
+# Unnecessary project files
+*.docx
+PM_Complete_Story_Document.docx
+
+# Database files
+data/*.db
+data/*.db-journal
+data/*.db-shm
+data/*.db-wal
+data/uploads/
+
+# Generated output files
+output/
+
+# Secrets — never commit
+.env
+
 # IDE
 .vscode/
 .idea/

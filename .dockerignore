@@ -1,0 +1,23 @@
+.env
+.env.production
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+tests/
+*.log
+server.log
+server_err.log
+output/
+data/pm_automation.db
+data/pm_automation.db-shm
+data/pm_automation.db-wal
+data/uploads/
+FIXED/
+original manuals/
+*.docx
+*.zip
+deploy.ps1

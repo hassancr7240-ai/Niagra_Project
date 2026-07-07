@@ -705,12 +705,12 @@ def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
 
     if not by_interval or (len(by_interval) == 1 and 0 in by_interval):
         # No interval data — single sheet with all tasks
-        ws = wb.create_sheet(title=f"{doc.interval_label} PM"[:31])
+        ws = wb.create_sheet(title=f"{doc.interval_label} PM".upper()[:31])
         _write_xlsx_sheet(ws, doc.machine_name, doc.interval_label, doc.tasks)
     else:
         for interval in sorted(by_interval.keys()):
             label = _xlsx_interval_label(interval)
-            ws = wb.create_sheet(title=label[:31])
+            ws = wb.create_sheet(title=label.upper()[:31])
             _write_xlsx_sheet(ws, doc.machine_name, label, by_interval[interval])
 
     wb.save(str(output_path))
@@ -745,7 +745,7 @@ def generate_xlsx_all_intervals(doc: PMDocument, output_dir: Path) -> list[tuple
         out_path = output_dir / file_name
         wb = Workbook()
         ws = wb.active
-        ws.title = label[:31]
+        ws.title = label.upper()[:31]
         _write_xlsx_sheet(ws, doc.machine_name, label, doc.tasks)
         wb.save(str(out_path))
         return [(out_path, label, doc.interval_hours or 0)]
@@ -758,7 +758,7 @@ def generate_xlsx_all_intervals(doc: PMDocument, output_dir: Path) -> list[tuple
         out_path = output_dir / file_name
         wb = Workbook()
         ws = wb.active
-        ws.title = label[:31]
+        ws.title = label.upper()[:31]
         _write_xlsx_sheet(ws, doc.machine_name, label, by_interval[interval])
         wb.save(str(out_path))
         results.append((out_path, label, interval))

@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+_GENERIC_IDS = {"THIRD_PARTY", "UNKNOWN", "EQUIPMENT", "GENERIC", "MANUAL", "OTHER"}
+
 from app.config import get_settings
 from app.core.document_generator import PMDocument, generate_docx, generate_pdf, generate_xlsx, generate_xlsx_all_intervals
 from app.core.pm_library import extract_parts_from_tasks, get_interval_label
@@ -193,7 +195,13 @@ async def generate_pm_document_from_manual(
     work_order = work_order or f"CHAT-{now.strftime('%Y%m%d%H%M%S')}"
     technician_name = technician_name or user.name or user.email
 
-    machine_label = upload.machine_id or upload.detected_manufacturer or "EQUIPMENT"
+    _mid = (upload.machine_id or "").upper().strip()
+    machine_label = (
+        upload.machine_id if _mid and _mid not in _GENERIC_IDS
+        else upload.detected_manufacturer
+        or Path(upload.original_filename).stem.replace("_", " ").replace("-", " ")
+        or "EQUIPMENT"
+    )
     manual_stem = sanitize_filename(Path(upload.original_filename).stem)
     safe_wo = sanitize_filename(work_order)
     file_name = f"PM_{manual_stem}_{now.strftime('%Y%m%d_%H%M%S')}_{safe_wo}.{output_format}"
@@ -318,7 +326,13 @@ async def generate_pm_xlsx_per_interval(
     work_order = work_order or f"CHAT-{now.strftime('%Y%m%d%H%M%S')}"
     technician_name = technician_name or user.name or user.email
 
-    machine_label = upload.machine_id or upload.detected_manufacturer or "EQUIPMENT"
+    _mid = (upload.machine_id or "").upper().strip()
+    machine_label = (
+        upload.machine_id if _mid and _mid not in _GENERIC_IDS
+        else upload.detected_manufacturer
+        or Path(upload.original_filename).stem.replace("_", " ").replace("-", " ")
+        or "EQUIPMENT"
+    )
     machine_id_str = upload.machine_id or f"MANUAL-{manual_id[:8]}"
 
     pm_doc = PMDocument(

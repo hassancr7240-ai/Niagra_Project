@@ -5,14 +5,15 @@
 # ============================================================
 
 # ── FILL THESE IN BEFORE RUNNING ────────────────────────────
-$RESOURCE_GROUP    = "pm-automation-rg"          # name for the Azure resource group
-$LOCATION          = "eastus"                     # Azure region (ask IT which one your company uses)
-$APP_NAME          = "pm-automation-niagara"      # must be globally unique — add your company name
-$ACR_NAME          = "pmautomationacr"            # Azure Container Registry name (letters/numbers only)
-$PLAN_NAME         = "pm-automation-plan"         # App Service Plan name
-$OPENAI_KEY        = "PASTE-YOUR-OPENAI-KEY-HERE"
-$OPENAI_BASE_URL   = ""                           # leave blank for regular OpenAI, or paste Azure OpenAI endpoint
-$STORAGE_CONN_STR  = ""                           # paste Azure Storage connection string (or leave blank for local)
+$RESOURCE_GROUP    = "rg-dev-IntegrationTeamAI"      # existing Niagara resource group
+$LOCATION          = "westus2"                        # West US 2 — matches existing resources
+$APP_NAME          = "pm-automation-niagara"          # must be globally unique
+$ACR_NAME          = "acrpmautomation"                # new Container Registry for this project
+$PLAN_NAME         = "asp-pm-automation"              # new App Service Plan for this project
+$WATSONX_API_KEY   = "PASTE-YOUR-WATSONX-API-KEY-HERE"
+$WATSONX_PROJECT   = "PASTE-YOUR-WATSONX-PROJECT-ID-HERE"
+$WATSONX_URL       = "https://us-south.ml.cloud.ibm.com"
+$STORAGE_CONN_STR  = "PASTE-YOUR-STORAGE-CONNECTION-STRING-HERE"
 $SECRET_KEY        = "CHANGE-ME-32-CHARS-RANDOM-STRING-HERE"
 $DEV_API_KEY       = "CHANGE-ME-SECRET-KEY"
 # ─────────────────────────────────────────────────────────────
@@ -26,12 +27,12 @@ Write-Host "[1/8] Logging in to Azure..." -ForegroundColor Yellow
 az login
 if ($LASTEXITCODE -ne 0) { Write-Host "Login failed. Exiting." -ForegroundColor Red; exit 1 }
 
-# Step 2: Create Resource Group
-Write-Host "[2/8] Creating resource group '$RESOURCE_GROUP' in '$LOCATION'..." -ForegroundColor Yellow
-az group create --name $RESOURCE_GROUP --location $LOCATION
-if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create resource group." -ForegroundColor Red; exit 1 }
+# Step 2: Use existing Resource Group (no need to create)
+Write-Host "[2/8] Using existing resource group '$RESOURCE_GROUP'..." -ForegroundColor Yellow
+az group show --name $RESOURCE_GROUP
+if ($LASTEXITCODE -ne 0) { Write-Host "Resource group not found. Check the name." -ForegroundColor Red; exit 1 }
 
-# Step 3: Create Azure Container Registry (stores your Docker image)
+# Step 3: Create new Container Registry for PM project
 Write-Host "[3/8] Creating Container Registry '$ACR_NAME'..." -ForegroundColor Yellow
 az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic --admin-enabled true
 if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create Container Registry." -ForegroundColor Red; exit 1 }
@@ -41,11 +42,12 @@ Write-Host "[4/8] Building and pushing Docker image (this takes 3-5 minutes)..."
 az acr build --registry $ACR_NAME --image pm-automation:latest .
 if ($LASTEXITCODE -ne 0) { Write-Host "Docker build failed." -ForegroundColor Red; exit 1 }
 
-# Step 5: Create App Service Plan (B2 = 2 cores, 3.5GB RAM — good for production)
-Write-Host "[5/8] Creating App Service Plan (B2 tier)..." -ForegroundColor Yellow
+# Step 5: Create App Service Plan for PM project
+Write-Host "[5/8] Creating App Service Plan '$PLAN_NAME' (B2 tier)..." -ForegroundColor Yellow
 az appservice plan create `
     --name $PLAN_NAME `
     --resource-group $RESOURCE_GROUP `
+    --location $LOCATION `
     --is-linux `
     --sku B2
 if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create App Service Plan." -ForegroundColor Red; exit 1 }
@@ -70,9 +72,6 @@ if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create Web App." -ForegroundCol
 # Step 8: Configure environment variables
 Write-Host "[7/8] Setting environment variables..." -ForegroundColor Yellow
 
-$STORAGE_TARGET = if ($STORAGE_CONN_STR) { "azure" } else { "local" }
-$OPENAI_URL     = if ($OPENAI_BASE_URL) { $OPENAI_BASE_URL } else { "" }
-
 az webapp config appsettings set `
     --resource-group $RESOURCE_GROUP `
     --name $APP_NAME `
@@ -81,14 +80,13 @@ az webapp config appsettings set `
         APP_DEBUG=false `
         APP_SECRET_KEY="$SECRET_KEY" `
         DEV_API_KEY="$DEV_API_KEY" `
-        AI_PROVIDER=openai `
-        OPENAI_API_KEY="$OPENAI_KEY" `
-        OPENAI_BASE_URL="$OPENAI_URL" `
-        OPENAI_MODEL_GENERATION=gpt-4o `
-        OPENAI_MODEL_CLASSIFICATION=gpt-4o-mini `
-        OPENAI_EMBEDDING_MODEL=text-embedding-3-large `
-        OPENAI_EMBEDDING_DIMS=3072 `
-        DEFAULT_STORAGE_TARGET="$STORAGE_TARGET" `
+        AI_PROVIDER=watsonx `
+        WATSONX_API_KEY="$WATSONX_API_KEY" `
+        WATSONX_PROJECT_ID="$WATSONX_PROJECT" `
+        WATSONX_URL="$WATSONX_URL" `
+        WATSONX_MODEL_GENERATION=ibm/granite-3-3-2b-instruct `
+        WATSONX_EMBEDDING_MODEL=ibm/slate-30m-english-rtrvr `
+        DEFAULT_STORAGE_TARGET=azure `
         AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN_STR" `
         AZURE_STORAGE_CONTAINER_NAME=pm-docs `
         LOCAL_STORAGE_PATH=/home/output/pm-docs `

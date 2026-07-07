@@ -33,8 +33,8 @@ Automated Preventive Maintenance checklist generation from machine manuals using
 | Backend API | FastAPI (Python 3.12) |
 | Database | SQLite (dev) / Azure SQL (production) |
 | Vector Store | SQLite cosine search / Azure AI Search |
-| AI — Chat & Extraction | IBM Granite 3.3 via Ollama (dev) / Azure OpenAI GPT-4o (production) |
-| AI — Embeddings | granite-embedding:latest via Ollama (dev) / text-embedding-3-large (production) |
+| AI — Chat & Extraction | IBM Granite 3.3 2B via Ollama (dev) / IBM watsonx.ai granite-3-3-2b-instruct (production) |
+| AI — Embeddings | granite-embedding:latest via Ollama (dev) / IBM watsonx.ai embeddings (production) |
 | File Storage | Local (dev) / Azure Blob Storage (production) |
 | Frontend | Vanilla JS + HTML dashboard |
 | Containerisation | Docker |
@@ -52,7 +52,7 @@ PDF Upload
     → Embedding: granite-embedding (384-dim vectors)
     → Stored in vector store (SQLite or Azure AI Search)
     → Semantic retrieval: top-10 chunks by cosine similarity
-    → AI task extraction: granite3.3:2b / GPT-4o
+    → AI task extraction: granite3.3:2b (local) / watsonx granite-3-3-2b-instruct (production)
     → Table fallback: 3-strategy parser for any table format
     → 98 tasks saved → grouped by interval → Excel files generated
 ```
@@ -201,11 +201,12 @@ See `.env.production` for full documentation. Key variables:
 
 | Variable | Description |
 |---|---|
-| `AI_PROVIDER` | `openai` or `watsonx` |
-| `OPENAI_API_KEY` | OpenAI or Azure OpenAI key |
-| `OPENAI_BASE_URL` | Leave blank for OpenAI; set for Azure OpenAI or Ollama |
-| `OPENAI_MODEL_GENERATION` | Model for task extraction + chat (e.g. `gpt-4o`) |
-| `OPENAI_EMBEDDING_MODEL` | Embedding model (e.g. `text-embedding-3-large`) |
+| `AI_PROVIDER` | `watsonx` (production) or `openai` (Ollama-compatible local) |
+| `WATSONX_API_KEY` | IBM watsonx.ai API key |
+| `WATSONX_PROJECT_ID` | IBM watsonx.ai Project ID |
+| `WATSONX_URL` | IBM watsonx.ai regional URL (e.g. `https://us-south.ml.cloud.ibm.com`) |
+| `OPENAI_BASE_URL` | Ollama URL for local dev (e.g. `http://localhost:11434/v1`) |
+| `OPENAI_MODEL_GENERATION` | Model name (e.g. `granite3.3:2b` for Ollama) |
 | `DEFAULT_STORAGE_TARGET` | `local`, `azure`, or `ftp` |
 | `AZURE_STORAGE_CONNECTION_STRING` | Azure Blob Storage connection |
 | `DATABASE_URL` | Leave blank for SQLite; set for Azure SQL |

@@ -582,163 +582,155 @@ def _xlsx_file_label(hours: int) -> str:
     return _INTERVAL_FILE_LABELS.get(hours, f"{hours}hr")
 
 
-def _write_xlsx_sheet(
-    ws,
-    machine_name: str,
-    interval_label: str,
-    tasks: list,
-    interval_hours: int = 0,
-    work_order: str = "",
-    technician_name: str = "",
-    generated_at=None,
-) -> None:
-    """Write one interval sheet matching the CON L3 240hr PM template format exactly."""
-    from datetime import datetime as _dt
-    if generated_at is None:
-        generated_at = _dt.utcnow()
+_THIN = Side(style="thin", color="000000")
+_BORDER_ALL = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+_FONT = Font(name="Calibri", size=11, bold=False, color="000000")
 
-    thin = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin"),
-    )
-    bold_font   = Font(name="Arial", bold=True, size=10)
-    body_font   = Font(name="Arial", size=10)
-    white_bold  = Font(name="Arial", bold=True, size=10, color="FFFFFF")
-    title_font  = Font(name="Arial", bold=True, size=12, color="FFFFFF")
-    navy_fill   = PatternFill("solid", fgColor="1B3A6B")
-    header_fill = PatternFill("solid", fgColor="2C3E50")
-    safety_fill = PatternFill("solid", fgColor="FADBD8")
-    alt_fill    = PatternFill("solid", fgColor="F2F3F4")
-    state_fill  = {
-        "RUNNING":     PatternFill("solid", fgColor="D5F5E3"),
-        "STOPPED":     PatternFill("solid", fgColor="FDEBD0"),
-        "POWERED_OFF": PatternFill("solid", fgColor="E8DAEF"),
-    }
+# Exact column widths (pt) taken from the approved reference file's <col> tags
+_COL_WIDTHS_PT = [67, 214, 58, 232, 85, 99, 122, 85, 85, 48, 48]  # A..K
 
-    # Column widths
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 18
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 50
-    ws.column_dimensions["E"].width = 15
-    ws.column_dimensions["F"].width = 8
-    ws.column_dimensions["G"].width = 16
-    ws.column_dimensions["H"].width = 18
 
-    # ── Row 1: Title ─────────────────────────────────────────────────────────
-    title_text = f"{machine_name.upper()} — {interval_label.upper()} PREVENTIVE MAINTENANCE"
-    ws.merge_cells("A1:H1")
-    c = ws.cell(row=1, column=1, value=title_text)
-    c.font = title_font
-    c.fill = navy_fill
+def _px_width(pt):
+    px = pt * 96 / 72
+    return round((px - 5) / 7, 1)
+
+
+def _set_col_widths(ws):
+    for i, pt in enumerate(_COL_WIDTHS_PT, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = _px_width(pt)
+
+
+def _fmt_cell(ws, row, col, value=None, align="left", wrap=True):
+    c = ws.cell(row=row, column=col, value=value)
+    c.font = _FONT
+    c.border = _BORDER_ALL
+    c.alignment = Alignment(horizontal=align, vertical="top", wrap_text=wrap)
+    return c
+
+
+def _merge_box(ws, row, col_start, col_end, row_end=None):
+    r2 = row_end or row
+    ws.merge_cells(start_row=row, start_column=col_start, end_row=r2, end_column=col_end)
+    for r in range(row, r2 + 1):
+        for c in range(col_start, col_end + 1):
+            ws.cell(row=r, column=c).border = _BORDER_ALL
+            ws.cell(row=r, column=c).font = _FONT
+
+
+def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
+                      interval_hours=None, work_order=None,
+                      technician_name=None, generated_at=None):
+    """
+    Renders the CON L3 <MACHINE> <HOURS> HOURS PM format exactly:
+      Row 1        : Asset Activity: | title | Description: | title
+      Row 2        : blank spacer
+      Row 3        : Task | Function/Area(B:D) | Action(E:I) | Initial(J:K)
+      Row 4..N     : task_no | area(B:D) | description(E:I) | blank(J:K)
+      Row N+1..N+2 : Part Number(A:B) | UOM(C) | Required Qty(D:E) |
+                     Issued Qty(F) | Pick Location(G) | blank(H) | Mechanic(I:J)
+      footer       : Actual start/end date, Comments, Team Member(s)
+      last row     : **** END OF REPORT ****  (centered, full width)
+    """
+    hours = interval_hours or 0
+    _set_col_widths(ws)
+    ws.sheet_view.showGridLines = False
+
+    title = f"CON L3 {machine_name.upper()} {hours} HOURS PM"
+
+    # Row 1 -- title bar
+    _fmt_cell(ws, 1, 1, "Asset Activity:", align="right")
+    _fmt_cell(ws, 1, 2, title, align="left")
+    _fmt_cell(ws, 1, 3, "Description:", align="left")
+    _fmt_cell(ws, 1, 4, title, align="left")
+    for c in range(5, 12):
+        ws.cell(row=1, column=c).border = _BORDER_ALL
+        ws.cell(row=1, column=c).font = _FONT
+    ws.row_dimensions[1].height = 13.2
+
+    # Row 2 blank spacer -> header starts row 3
+    row = 3
+    _fmt_cell(ws, row, 1, "Task", align="left")
+    _merge_box(ws, row, 2, 4)
+    ws.cell(row=row, column=2, value="Function / Area")
+    _merge_box(ws, row, 5, 9)
+    ws.cell(row=row, column=5, value="Action")
+    _merge_box(ws, row, 10, 11)
+    ws.cell(row=row, column=10, value="Initial")
+    for c in (2, 5, 10):
+        ws.cell(row=row, column=c).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    row += 1
+
+    # Task rows
+    for t in tasks:
+        task_no = getattr(t, "task_no", None) if not isinstance(t, dict) else t.get("task_no")
+        area = getattr(t, "area", None) if not isinstance(t, dict) else t.get("area")
+        desc = getattr(t, "description", None) if not isinstance(t, dict) else t.get("description")
+
+        _fmt_cell(ws, row, 1, task_no, align="right")
+        _merge_box(ws, row, 2, 4)
+        ws.cell(row=row, column=2, value=(area or "").upper())
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        _merge_box(ws, row, 5, 9)
+        ws.cell(row=row, column=5, value=(desc or "").upper())
+        ws.cell(row=row, column=5).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        _merge_box(ws, row, 10, 11)
+        row += 1
+
+    row += 1  # blank spacer before parts table
+
+    # Parts header (2 rows tall)
+    pr = row
+    _merge_box(ws, pr, 1, 2, pr + 1)
+    ws.cell(row=pr, column=1, value="Part Number")
+    ws.cell(row=pr, column=1).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    _merge_box(ws, pr, 3, 3, pr + 1)
+    ws.cell(row=pr, column=3, value="UOM")
+    ws.cell(row=pr, column=3).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    _merge_box(ws, pr, 4, 5, pr + 1)
+    ws.cell(row=pr, column=4, value="Required Qty")
+    ws.cell(row=pr, column=4).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    _merge_box(ws, pr, 6, 6, pr + 1)
+    ws.cell(row=pr, column=6, value="Issued Qty")
+    ws.cell(row=pr, column=6).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    _merge_box(ws, pr, 7, 7, pr + 1)
+    ws.cell(row=pr, column=7, value="Pick Location")
+    ws.cell(row=pr, column=7).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    _merge_box(ws, pr, 8, 8, pr + 1)  # blank column, 2 rows
+
+    _merge_box(ws, pr, 9, 10)  # Mechanic, row 1 only
+    ws.cell(row=pr, column=9, value="Mechanic")
+    ws.cell(row=pr, column=9).alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
+    _fmt_cell(ws, pr, 11, None)
+
+    _merge_box(ws, pr + 1, 9, 10)  # row 2 continuation of Mechanic box
+    _fmt_cell(ws, pr + 1, 11, None)
+
+    row = pr + 2
+    row += 1  # blank spacer (no border)
+
+    footer_lines = [
+        "Actual start date: ___________   Actual end date: ___________   Hours ___________",
+        "Comments & Action: ____________________________________________________",
+        "Team Member(s): _______________________________________________________",
+    ]
+    for line in footer_lines:
+        c = ws.cell(row=row, column=1, value=line)
+        c.font = _FONT
+        c.alignment = Alignment(horizontal="left", vertical="top")
+        row += 1
+
+    row += 1  # blank spacer
+
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=11)
+    c = ws.cell(row=row, column=1,
+                value="**************************** END OF REPORT **************************")
+    c.font = _FONT
     c.alignment = Alignment(horizontal="center", vertical="center")
-    c.border = thin
-    ws.row_dimensions[1].height = 24
-
-    # ── Row 2: Work Order / Technician ────────────────────────────────────────
-    ws.cell(row=2, column=1, value="Work Order:").font = bold_font
-    ws.cell(row=2, column=1).border = thin
-    ws.merge_cells("B2:C2")
-    ws.cell(row=2, column=2, value=work_order or "").font = body_font
-    ws.cell(row=2, column=2).border = thin
-    ws.cell(row=2, column=4, value="Technician:").font = bold_font
-    ws.cell(row=2, column=4).border = thin
-    ws.merge_cells("E2:H2")
-    ws.cell(row=2, column=5, value=technician_name or "").font = body_font
-    ws.cell(row=2, column=5).border = thin
-
-    # ── Row 3: Machine ID / Generated ────────────────────────────────────────
-    ws.cell(row=3, column=1, value="Machine ID:").font = bold_font
-    ws.cell(row=3, column=1).border = thin
-    ws.merge_cells("B3:C3")
-    ws.cell(row=3, column=2, value=machine_name.upper()).font = body_font
-    ws.cell(row=3, column=2).border = thin
-    ws.cell(row=3, column=4, value="Generated:").font = bold_font
-    ws.cell(row=3, column=4).border = thin
-    ws.merge_cells("E3:H3")
-    ws.cell(row=3, column=5, value=generated_at.strftime("%d %b %Y %H:%M UTC")).font = body_font
-    ws.cell(row=3, column=5).border = thin
-
-    # ── Row 4: Interval / Start Date ─────────────────────────────────────────
-    ws.cell(row=4, column=1, value="Interval:").font = bold_font
-    ws.cell(row=4, column=1).border = thin
-    ws.merge_cells("B4:C4")
-    interval_val = f"{interval_hours} hrs" if interval_hours else interval_label
-    ws.cell(row=4, column=2, value=interval_val).font = body_font
-    ws.cell(row=4, column=2).border = thin
-    ws.cell(row=4, column=4, value="Start Date:").font = bold_font
-    ws.cell(row=4, column=4).border = thin
-    ws.merge_cells("E4:H4")
-    ws.cell(row=4, column=5, value="_______________").font = body_font
-    ws.cell(row=4, column=5).border = thin
-
-    # ── Row 5: Column headers ─────────────────────────────────────────────────
-    headers = ["Task #", "Area", "Action", "Description",
-               "Machine State", "Safety", "Part #", "Initial / Done ☐"]
-    ws.row_dimensions[5].height = 20
-    for col, hdr in enumerate(headers, 1):
-        c = ws.cell(row=5, column=col, value=hdr)
-        c.font = white_bold
-        c.fill = header_fill
-        c.border = thin
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    # ── Task rows ─────────────────────────────────────────────────────────────
-    state_order = {"RUNNING": 0, "STOPPED": 1, "POWERED_OFF": 2}
-    sorted_tasks = sorted(
-        tasks,
-        key=lambda t: (
-            state_order.get(getattr(t, "machine_state", "STOPPED"), 1),
-            getattr(t, "task_no", 0),
-        ),
-    )
-
-    row_idx = 6
-    for i, task in enumerate(sorted_tasks):
-        t_no    = getattr(task, "task_no", (i + 1) * 10)
-        area    = str(getattr(task, "area", "") or "").upper()
-        action  = str(getattr(task, "action", "") or "").upper()
-        desc    = str(getattr(task, "description", "") or "")
-        state   = getattr(task, "machine_state", "STOPPED")
-        safety  = bool(getattr(task, "safety_flag", False))
-        part_no = getattr(task, "part_number", None) or ""
-
-        row_fill = safety_fill if safety else state_fill.get(state, alt_fill if i % 2 == 0 else None)
-
-        values = [t_no, area, action, desc, state, "⚠" if safety else "", part_no, ""]
-        aligns = ["right", "left", "left", "left", "center", "center", "left", "center"]
-
-        for col, (val, align) in enumerate(zip(values, aligns), 1):
-            c = ws.cell(row=row_idx, column=col, value=val)
-            c.font = body_font
-            c.border = thin
-            c.alignment = Alignment(horizontal=align, wrap_text=(col == 4), vertical="top")
-            if row_fill:
-                c.fill = row_fill
-
-        desc_lines = max(1, len(desc) // 80 + 1)
-        ws.row_dimensions[row_idx].height = max(15, min(desc_lines * 15, 75))
-        row_idx += 1
-
-    # ── Footer ────────────────────────────────────────────────────────────────
-    row_idx += 1
-    ws.merge_cells(f"A{row_idx}:H{row_idx}")
-    c = ws.cell(row=row_idx, column=1, value="**** END OF REPORT ****")
-    c.font = white_bold
-    c.fill = navy_fill
-    c.alignment = Alignment(horizontal="center")
-    c.border = thin
-
-    for line in [
-        "PRIOR TO RETURNING TO SERVICE FOLLOW ALL GMP PROCEDURES",
-        "Remove all LOTO (Lockout/Tagout) devices before returning to service",
-        "Re-check all E-STOP (Emergency Stop) and control switches before restart",
-    ]:
-        row_idx += 1
-        ws.merge_cells(f"A{row_idx}:H{row_idx}")
-        c = ws.cell(row=row_idx, column=1, value=line)
-        c.font = body_font
-        c.border = thin
 
 
 def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:

@@ -146,7 +146,7 @@ async def get_upload_status_light(manual_id: str, user: CurrentUserDep, db: DBDe
         "CHUNKING":   (45, "Splitting into chunks…"),
         "EMBEDDING":  (65, "Generating embeddings…"),
         "EXTRACTING": (85, "Extracting PM tasks…"),
-        "PENDING_REVIEW": (100, "Processing complete — ready to chat!"),
+        "PENDING_REVIEW": (100, "Processing complete — ready to generate documents!"),
         "APPROVED":   (100, "Approved and added to PM Library"),
         "FAILED":     (0,  "Processing failed"),
     }
@@ -418,7 +418,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     """
     import json
     import logging
-    from app.rag.chunker import TextChunk, chunk_text, extract_chapter_text, extract_text_from_pdf
+    from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
     from app.rag.classifier import classify_manual
     from app.rag.embedder import embed_chunks
     from app.rag.extractor import extract_tasks_from_chunks
@@ -436,21 +436,19 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     classification = await classify_manual(pdf_path, sample_text)
     log.info("[%s] Classified: %s %s", manual_id, classification.manufacturer, classification.model)
 
+    # Structure-aware chunking: table rows → sections → checkbox items → fallback
     update_fn("CHUNKING")
-    chapter_text = ""
-    for ch_num in (classification.detected_chapters or []):
-        chapter_text += extract_chapter_text(full_text, ch_num) + "\n"
-    if not chapter_text:
-        chapter_text = full_text
-
-    chunks = chunk_text(
-        chapter_text,
+    chunks = smart_chunk_pdf(
+        pdf_path,
         source_file=pdf_path.name,
-        chunk_size=settings.rag_chunk_size,
-        overlap=settings.rag_chunk_overlap,
-        page_offsets=page_offsets,
+        max_section_words=settings.rag_max_section_words,
+        min_section_words=settings.rag_min_section_words,
     )
-    log.info("[%s] Created %d chunks", manual_id, len(chunks))
+    type_summary = ', '.join(
+        f'{t}={sum(1 for c in chunks if c.chunk_type == t)}'
+        for t in dict.fromkeys(c.chunk_type for c in chunks)
+    )
+    log.info("[%s] Smart chunking: %d chunks (%s)", manual_id, len(chunks), type_summary)
 
     update_fn("EMBEDDING")
     embedded = await embed_chunks(chunks)
@@ -470,7 +468,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0), "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")} for e in embedded[:10]]
 
     from app.rag.pipeline import _guess_intervals
-    interval_hints = _guess_intervals(classification.manufacturer)
+    # Merge manufacturer defaults with intervals detected from document structure
+    chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
+    interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
     extracted_tasks = await extract_tasks_from_chunks(
         top_chunks,
         manufacturer=classification.manufacturer,

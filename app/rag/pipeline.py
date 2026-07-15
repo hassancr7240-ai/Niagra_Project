@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import crud
-from app.rag.chunker import chunk_text, extract_chapter_text, extract_text_from_pdf, find_maintenance_chapter
+from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
 from app.rag.classifier import classify_manual
 from app.rag.embedder import embed_chunks
 from app.rag.extractor import extract_tasks_from_chunks
@@ -64,25 +64,21 @@ async def run_pipeline(
         logger.info("[%s] Classified: %s %s (chapters=%s)", manual_id,
                     classification.manufacturer, classification.model, classification.detected_chapters)
 
-        # Step 3: Find Chapter (auto for Krones, RAG search for others)
+        # Step 3: Structure-aware PDF chunking
         await _update_status(db, manual_id, "CHUNKING")
-        chapter_text = ""
-        for ch_num in (classification.detected_chapters or []):
-            chapter_text += extract_chapter_text(full_text, ch_num) + "\n"
-        if not chapter_text:
-            chapter_text = full_text
-
-        # Step 4: PDF Chunking — 500 words / 103 word overlap
         source_name = pdf_path.name
-        chunks = chunk_text(
-            chapter_text,
+        chunks = smart_chunk_pdf(
+            pdf_path,
             source_file=source_name,
-            chunk_size=settings.rag_chunk_size,
-            overlap=settings.rag_chunk_overlap,
-            page_offsets=page_offsets,
+            max_section_words=settings.rag_max_section_words,
+            min_section_words=settings.rag_min_section_words,
         )
         results["chunk_count"] = len(chunks)
-        logger.info("[%s] Created %d chunks", manual_id, len(chunks))
+        type_summary = ', '.join(
+            f'{t}={sum(1 for c in chunks if c.chunk_type == t)}'
+            for t in dict.fromkeys(c.chunk_type for c in chunks)
+        )
+        logger.info("[%s] Smart chunking: %d chunks (%s)", manual_id, len(chunks), type_summary)
 
         # Step 5: Embed Chunks → text-embedding-3
         await _update_status(db, manual_id, "EMBEDDING")
@@ -100,7 +96,9 @@ async def run_pipeline(
         top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
 
         # Step 8: AI Extraction → structured JSON
-        interval_hints = _guess_intervals(classification.manufacturer)
+        # Merge manufacturer defaults with intervals detected from document structure
+        chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
+        interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
         extracted_tasks = await extract_tasks_from_chunks(
             top_chunks or _to_chunk_dicts(embedded[:10]),
             manufacturer=classification.manufacturer,
@@ -165,8 +163,11 @@ async def _retrieve_maintenance_chunks(
         "safety lockout LOTO cleaning filter belt bearing grease oil schedule checklist"
     )
     try:
-        query_chunk = [{"chunk_id": "maint_query", "text": query_text,
-                        "page_start": 0, "page_end": 0, "source_file": "query"}]
+        query_chunk = [TextChunk(
+            chunk_id="maint_query", text=query_text,
+            page_start=0, page_end=0, char_start=0, char_end=len(query_text),
+            source_file="query", chunk_type="text",
+        )]
         embedded_query = await embed_chunks(query_chunk)
         if not embedded_query:
             return _to_chunk_dicts(embedded[:10])

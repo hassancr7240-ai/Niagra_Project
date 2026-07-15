@@ -88,9 +88,13 @@ class Settings(BaseSettings):
     azure_search_index_name: str = "pm-manuals"
 
     # ── RAG Pipeline ─────────────────────────────────────────────────────────
+    # Smart chunking (structure-aware — primary approach)
+    rag_max_section_words: int = 800   # max words per section chunk before paragraph split
+    rag_min_section_words: int = 20    # sections smaller than this are merged into next
+    rag_top_k: int = 10                # top-K chunks retrieved for AI extraction
+    # Sliding-window fallback (used only when structure detection finds nothing)
     rag_chunk_size: int = 500
     rag_chunk_overlap: int = 103
-    rag_top_k: int = 10
 
     # ── Storage ───────────────────────────────────────────────────────────────
     default_storage_target: str = "local"  # azure | ftp | local

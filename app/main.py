@@ -11,7 +11,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import download, generate, history, library, machines, manual, checklist, export, chat
+from app.api.routes import download, generate, history, library, machines, manual, checklist, export
 from app.config import get_settings
 from app.core.app_insights import RequestLoggingMiddleware, init_app_insights
 from app.core.key_vault import load_secrets_from_key_vault
@@ -186,7 +186,6 @@ app.include_router(manual.router)
 app.include_router(download.router)
 app.include_router(checklist.router)
 app.include_router(export.router)
-app.include_router(chat.router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

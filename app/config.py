@@ -52,34 +52,32 @@ class Settings(BaseSettings):
     ftp_remote_base_path: str = "/pm-docs"
 
     # ── AI Provider ───────────────────────────────────────────────────────────
-    ai_provider: str = "openai"  # openai | watsonx  — override with AI_PROVIDER=watsonx in .env
-    openai_api_key: Optional[str] = None
-    # Override to point the "openai" provider at an OpenAI-compatible server instead
-    # of api.openai.com — e.g. a local Ollama instance serving IBM Granite models:
-    #   AI_PROVIDER=openai
-    #   OPENAI_BASE_URL=http://localhost:11434/v1
-    #   OPENAI_API_KEY=ollama                       (any non-empty value, Ollama ignores it)
-    #   OPENAI_MODEL_GENERATION=granite3.3:8b
-    #   OPENAI_MODEL_CLASSIFICATION=granite3.3:8b
-    #   OPENAI_EMBEDDING_MODEL=granite-embedding:latest
-    openai_base_url: Optional[str] = None
-    openai_model_generation: str = "gpt-4o"
-    openai_model_classification: str = "gpt-4o-mini"
-    openai_embedding_model: str = "text-embedding-3-large"
-    openai_embedding_dims: int = 3072
+    # Production : AI_PROVIDER=watsonx  -> IBM watsonx.ai (Granite models, cloud)
+    # Local dev  : AI_PROVIDER=openai   -> Ollama running IBM Granite locally
+    #              OPENAI_BASE_URL=http://localhost:11434/v1
+    #              OPENAI_API_KEY=ollama
+    ai_provider: str = "watsonx"  # watsonx (production) | openai (Ollama local dev only)
 
-    # IBM watsonx.ai — verified model IDs (confirmed available in us-south deployment)
-    # Chat + Analytics + Classification: ibm/granite-3-8b-instruct
-    # Code/Task Extraction:              ibm/granite-8b-code-instruct
-    # Embedding:                         ibm/slate-125m-english-rtrvr-v2  (1024 dims)
+    # Ollama local dev (IBM Granite via Ollama) - NOT used in production
+    openai_api_key: Optional[str] = None          # set to "ollama" for local Ollama
+    openai_base_url: Optional[str] = None         # e.g. http://localhost:11434/v1
+    openai_model_generation: str = "granite3.3:8b"
+    openai_model_classification: str = "granite3.3:8b"
+    openai_embedding_model: str = "granite-embedding:latest"
+    openai_embedding_dims: int = 384              # granite-embedding output size
+
+    # IBM watsonx.ai - all production AI runs here (IBM Granite models)
+    # Task extraction  : ibm/granite-8b-code-instruct  (JSON-optimised)
+    # Classification   : ibm/granite-3-8b-instruct     (instruction-following)
+    # Analytics        : ibm/granite-3-8b-instruct
+    # Embedding        : ibm/slate-125m-english-rtrvr-v2 (1024 dims)
     watsonx_api_key: Optional[str] = None
     watsonx_project_id: Optional[str] = None
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"
-    watsonx_model_generation: str = "ibm/granite-8b-code-instruct"      # task JSON extraction
-    watsonx_model_classification: str = "ibm/granite-3-8b-instruct"     # PDF manufacturer detect
-    watsonx_model_analytics: str = "ibm/granite-3-8b-instruct"          # chat + analytics
-    watsonx_model_chat: str = "ibm/granite-3-8b-instruct"               # PM chat assistant
-    watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr-v2"   # 1024-dim embeddings
+    watsonx_model_generation: str = "ibm/granite-8b-code-instruct"
+    watsonx_model_classification: str = "ibm/granite-3-8b-instruct"
+    watsonx_model_analytics: str = "ibm/granite-3-8b-instruct"
+    watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr-v2"
     watsonx_embedding_dims: int = 1024
 
     # ── Azure AI Search ───────────────────────────────────────────────────────

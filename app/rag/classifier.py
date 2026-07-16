@@ -47,7 +47,7 @@ async def classify_manual(pdf_path: Path, sample_text: str) -> ClassificationRes
         if settings.ai_provider == "watsonx" and settings.watsonx_api_key:
             ai_result = await _ai_classify_watsonx(sample_text)
         else:
-            ai_result = await _ai_classify_openai(sample_text)
+            ai_result = await _ai_classify_ollama(sample_text)
         if ai_result.confidence > result.confidence:
             return ai_result
     except Exception:
@@ -120,7 +120,7 @@ def _detect_maintenance_chapters(text_lower: str) -> list[int]:
     return chapters[:3]
 
 
-async def _ai_classify_openai(sample_text: str) -> ClassificationResult:
+async def _ai_classify_ollama(sample_text: str) -> ClassificationResult:
     from openai import AsyncOpenAI
     import json
 

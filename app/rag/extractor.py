@@ -60,10 +60,10 @@ async def extract_tasks_from_chunks(
 
     if settings.ai_provider == "watsonx":
         return await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
-    return await _extract_openai(combined_text, manufacturer, model, interval_hints)
+    return await _extract_ollama(combined_text, manufacturer, model, interval_hints)
 
+async def _extract_ollama(  # Ollama (local IBM Granite) via OpenAI-compatible API
 
-async def _extract_openai(
     text: str,
     manufacturer: str,
     model: Optional[str],

@@ -21,17 +21,18 @@ async def embed_chunks(chunks: list[TextChunk]) -> list[dict]:
 
     if settings.ai_provider == "watsonx":
         return await _embed_watsonx(chunks)
-    return await _embed_openai(chunks)
+    return await _embed_ollama(chunks)
 
 
-async def _embed_openai(chunks: list[TextChunk]) -> list[dict]:
+async def _embed_ollama(chunks: list[TextChunk]) -> list[dict]:
+    """Ollama (local IBM Granite) embedding via OpenAI-compatible API."""
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     # The `dimensions` parameter is an OpenAI-specific extension (text-embedding-3-*).
     # OpenAI-compatible servers like Ollama reject it, so only send it against the
     # real OpenAI endpoint.
-    using_openai_dotcom = not settings.openai_base_url
+    using_openai_cloud = not settings.openai_base_url
     results = []
     batch_size = 50
 
@@ -41,7 +42,7 @@ async def _embed_openai(chunks: list[TextChunk]) -> list[dict]:
 
         try:
             kwargs = {"model": settings.openai_embedding_model, "input": texts}
-            if using_openai_dotcom:
+            if using_openai_cloud:
                 kwargs["dimensions"] = settings.openai_embedding_dims
             response = await client.embeddings.create(**kwargs)
             for j, embedding_data in enumerate(response.data):

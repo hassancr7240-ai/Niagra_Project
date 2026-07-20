@@ -24,6 +24,38 @@ class TextChunk:
     section_heading: str = ""             # parent heading detected from document structure
     interval_hint: Optional[int] = None   # PM interval hours detected from section context
     table_data: Optional[dict] = None     # column→value map for table_row chunks
+    # Citation metadata — required for manager's production format
+    content_type: str = "procedure"       # procedure | warning | loto | ppe | parts_list | startup | toc | table
+    manual_id: str = ""                   # FK to manual_uploads.manual_id
+    manual_version: str = ""              # e.g. "Rev-C" detected from doc header
+
+
+# ── Content Type Detection ─────────────────────────────────────────────────────
+
+_CONTENT_TYPE_RULES: list[tuple[str, list[str]]] = [
+    ("warning",    ["warning", "danger", "caution", "hazard", "warnung", "gefahr", "vorsicht", "achtung"]),
+    ("loto",       ["lockout", "tagout", "loto", "energy isolation", "de-energi", "absperren",
+                    "verriegeln", "lock out", "energie", "isolation procedure"]),
+    ("ppe",        ["ppe", "protective equipment", "safety gear", "glove", "goggle",
+                    "helmet", "harness", "respirator", "schutzausrüstung"]),
+    ("parts_list", ["spare part", "part number", "consumable", "bill of material", "material list",
+                    "ersatzteil", "part no", "article number", "bestell"]),
+    ("startup",    ["startup", "start-up", "restart", "re-start", "commissioning",
+                    "inbetriebnahme", "after maintenance", "nach wartung", "recommission"]),
+    ("toc",        ["table of contents", "contents", "inhaltsverzeichnis", "index",
+                    "maintenance schedule", "service schedule", "wartungsplan"]),
+]
+
+
+def _detect_content_type(text: str, heading: str, chunk_type: str) -> str:
+    """Classify a chunk into a content type used by the 8-pass retrieval strategy."""
+    if chunk_type == "table_row":
+        return "table"
+    combined = (heading + " " + text[:400]).lower()
+    for ct, keywords in _CONTENT_TYPE_RULES:
+        if any(kw in combined for kw in keywords):
+            return ct
+    return "procedure"
 
 
 # ── Heading Detection ──────────────────────────────────────────────────────────
@@ -87,16 +119,34 @@ def _wc(text: str) -> int:
 
 # ── Pass 1: Table Row Extraction ───────────────────────────────────────────────
 
-def _extract_table_chunks(pdf, source_file: str) -> list[TextChunk]:
+_TABLE_SCAN_KW = frozenset({
+    'interval', 'hours', 'maintenance', 'lubrication', 'inspection',
+    'replace', 'check', 'clean', 'service', 'wartung', 'filter',
+    'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
+    'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
+})
+_TABLE_PAGE_CAP = 150   # never scan more than this many pages for tables
+
+
+def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:
     """
     Extract every structured table row as its own chunk.
     Highest-precision path — no word-window approximation.
+
+    Speed: extract_text() (fast) gates each page before the slow
+    extract_tables() call.  Hard cap at _TABLE_PAGE_CAP pages so
+    very large PDFs don't take 10+ minutes.
     """
     chunks: list[TextChunk] = []
     idx = 0
 
-    for page in pdf.pages:
+    for page in pdf.pages[:_TABLE_PAGE_CAP]:
         pn = page.page_number
+        # Fast gate: only run the slow extract_tables() on pages that
+        # actually contain maintenance-related text.
+        page_text_lower = (page.extract_text() or '').lower()
+        if not any(kw in page_text_lower for kw in _TABLE_SCAN_KW):
+            continue
         for table in (page.extract_tables() or []):
             if not table or len(table) < 2:
                 continue
@@ -137,6 +187,9 @@ def _extract_table_chunks(pdf, source_file: str) -> list[TextChunk]:
                     chunk_type='table_row',
                     interval_hint=interval,
                     table_data=row_data,
+                    content_type='table',
+                    manual_id=manual_id,
+                    manual_version=manual_version,
                 ))
                 idx += 1
 
@@ -150,6 +203,8 @@ def _extract_section_chunks(
     source_file: str,
     max_section_words: int,
     min_section_words: int,
+    manual_id: str = "",
+    manual_version: str = "",
 ) -> list[TextChunk]:
     """
     Walk every page line-by-line.  Whenever a heading pattern is detected,
@@ -171,15 +226,16 @@ def _extract_section_chunks(
         if _wc(body) < min_section_words:
             return
         prefix = f'[SECTION: {current_heading}]\n' if current_heading else ''
+        ct = _detect_content_type(body, current_heading, 'section')
         for sub in _split_long_section(
             prefix + body, source_file, idx,
             current_heading, current_page_start, page_end,
-            current_interval, max_section_words,
+            current_interval, max_section_words, ct, manual_id, manual_version,
         ):
             chunks.append(sub)
             idx += 1
 
-    for page in pdf.pages:
+    for page in pdf.pages[:_TABLE_PAGE_CAP]:
         pn = page.page_number
         for line in (page.extract_text() or '').split('\n'):
             stripped = line.strip()
@@ -211,6 +267,9 @@ def _split_long_section(
     page_end: int,
     interval: Optional[int],
     max_words: int,
+    content_type: str = "procedure",
+    manual_id: str = "",
+    manual_version: str = "",
 ) -> list[TextChunk]:
     """Split an oversized section at paragraph boundaries, repeating heading context."""
     if _wc(text) <= max_words:
@@ -223,6 +282,9 @@ def _split_long_section(
             chunk_type='section',
             section_heading=heading,
             interval_hint=interval,
+            content_type=content_type,
+            manual_id=manual_id,
+            manual_version=manual_version,
         )]
 
     prefix = f'[SECTION: {heading}]\n' if heading else ''
@@ -244,6 +306,9 @@ def _split_long_section(
                 chunk_type='paragraph',
                 section_heading=heading,
                 interval_hint=interval,
+                content_type=content_type,
+                manual_id=manual_id,
+                manual_version=manual_version,
             ))
             sub_idx += 1
             buf, buf_words = [para], pw
@@ -261,6 +326,9 @@ def _split_long_section(
             chunk_type='paragraph',
             section_heading=heading,
             interval_hint=interval,
+            content_type=content_type,
+            manual_id=manual_id,
+            manual_version=manual_version,
         ))
 
     return result
@@ -294,6 +362,9 @@ def _extract_checkbox_chunks(section_chunks: list[TextChunk]) -> list[TextChunk]
                 chunk_type='checkbox',
                 section_heading=chunk.section_heading,
                 interval_hint=chunk.interval_hint,
+                content_type=chunk.content_type,
+                manual_id=chunk.manual_id,
+                manual_version=chunk.manual_version,
             ))
     return result
 
@@ -305,6 +376,8 @@ def smart_chunk_pdf(
     source_file: str,
     max_section_words: int = 800,
     min_section_words: int = 20,
+    manual_id: str = "",
+    manual_version: str = "",
 ) -> list[TextChunk]:
     """
     Structure-aware PDF chunking — preferred entry point.
@@ -315,13 +388,13 @@ def smart_chunk_pdf(
       3. Checkbox items  — task-indicator symbols get individual chunks
       4. Sliding window  — last-resort fallback only
 
-    Each chunk carries section_heading and interval_hint metadata so the
-    AI extractor receives richer context without needing to re-parse structure.
+    Each chunk carries section_heading, interval_hint, content_type, manual_id,
+    and manual_version so the 8-pass retrieval and citation tracking work correctly.
     """
     with pdfplumber.open(str(pdf_path)) as pdf:
-        table_chunks = _extract_table_chunks(pdf, source_file)
+        table_chunks = _extract_table_chunks(pdf, source_file, manual_id, manual_version)
         section_chunks = _extract_section_chunks(
-            pdf, source_file, max_section_words, min_section_words
+            pdf, source_file, max_section_words, min_section_words, manual_id, manual_version
         )
         refined_chunks = _extract_checkbox_chunks(section_chunks)
 
@@ -335,14 +408,20 @@ def smart_chunk_pdf(
     return all_chunks
 
 
+_TEXT_PAGE_CAP = 60   # extract text from at most this many pages (enough for 15 000-char sample)
+_TEXT_CHAR_CAP = 25000  # stop reading pages once we have this many chars
+
+
 def extract_text_from_pdf(pdf_path: Path) -> tuple[str, dict[int, int]]:
-    """Extract full text from PDF with page boundary tracking."""
+    """Extract text from the first _TEXT_PAGE_CAP pages (enough for classification)."""
     full_text = ''
     page_offsets: dict[int, int] = {}
     with pdfplumber.open(str(pdf_path)) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
+        for i, page in enumerate(pdf.pages[:_TEXT_PAGE_CAP], start=1):
             page_offsets[i] = len(full_text)
             full_text += (page.extract_text() or '') + '\n'
+            if len(full_text) >= _TEXT_CHAR_CAP:
+                break
     return full_text, page_offsets
 
 

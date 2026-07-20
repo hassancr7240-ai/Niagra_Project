@@ -89,9 +89,9 @@ function showPage(name) {
 
   // Lazy-load page data
   if (name === 'history') loadHistory();
+  if (name === 'export') loadExportPage();
   if (name === 'library') loadLibrary();
   if (name === 'machines') loadMachines();
-  if (name === 'upload') loadUploads();
   if (name === 'chat') initChat();
   if (name === 'checklist') loadRecentPMsForChecklist();
 }
@@ -333,7 +333,14 @@ async function submitGenerate(e) {
 }
 
 function quickGenerate(machineId, intervalHours) {
-  showPage('generate');
+  // Show the hidden generate page (used from dashboard schedule table)
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const genPage = document.getElementById('page-generate');
+  genPage.style.display = '';
+  genPage.classList.add('active');
+  document.getElementById('pageTitle').textContent = 'Generate PM Checklist';
+
   setTimeout(() => {
     const machSel = document.getElementById('gen-machine');
     machSel.value = machineId;
@@ -407,8 +414,11 @@ async function loadHistory() {
       return;
     }
 
+    document.getElementById('histSelectAll').checked = false;
+    document.getElementById('histDeleteBtn').style.display = 'none';
     tbody.innerHTML = data.records.map(r => `
       <tr>
+        <td><input type="checkbox" class="hist-check" value="${r.record_id}" onchange="updateDeleteBtn('historyBody','histDeleteBtn')" /></td>
         <td style="font-size:11px;color:var(--grey-500)">${new Date(r.created_at).toLocaleString()}</td>
         <td><strong>${r.machine_name}</strong></td>
         <td>${r.interval_label}</td>
@@ -417,22 +427,11 @@ async function loadHistory() {
         <td>${statusBadge(r.status)}</td>
         <td>
           ${r.download_url
-            ? `<a href="${makeDownloadUrl(r.download_url)}" target="_blank" class="btn btn-primary btn-sm">⬇ PDF</a>`
-            : ''}
-          <button class="btn btn-outline btn-sm" style="margin-left:4px"
-            onclick="fillChecklistById('${r.record_id}')" title="Fill Checklist for this PM">
-            ✅ Fill
-          </button>
+            ? `<a href="${makeDownloadUrl(r.download_url)}" target="_blank" class="btn btn-primary btn-sm">⬇ Download</a>`
+            : '—'}
           ${(r.status === 'COMPLETED' && canApprove())
             ? `<button class="btn btn-success btn-sm" style="margin-left:4px" onclick="approveRecord('${r.record_id}')">✓ Approve</button>`
             : ''}
-        </td>
-        <td>
-          <span style="font-size:10px;color:var(--grey-500);font-family:monospace"
-            title="PM Record ID — click to copy" onclick="copyText('${r.record_id}',this)"
-            style="cursor:pointer">
-            ${r.record_id.substring(0, 8)}…
-          </span>
         </td>
       </tr>`).join('');
   } catch(e) {
@@ -606,32 +605,72 @@ async function submitNewMachine(e) {
 
 let _currentManualId = null;
 let _pipelinePoller = null;
+let _pipelineStartTime = null;
+let _elapsedTimer = null;
 
 const PIPELINE_STEPS = [
-  { key: 'UPLOADED',       label: 'Uploaded',               icon: '📤' },
-  { key: 'CLASSIFYING',    label: 'Classifying manufacturer', icon: '🔍' },
-  { key: 'CHUNKING',       label: 'Chunking text (500w)',    icon: '✂️' },
-  { key: 'EMBEDDING',      label: 'Embedding with IBM Granite', icon: '🧠' },
-  { key: 'EXTRACTING',     label: 'Extracting PM tasks',     icon: '⚙️' },
-  { key: 'PENDING_REVIEW', label: 'Ready for review',        icon: '✅' },
-  { key: 'APPROVED',       label: 'Approved & added to library', icon: '🎉' },
+  { key: 'UPLOADED',       label: 'Uploaded',               icon: '📤', est: null },
+  { key: 'CLASSIFYING',    label: 'Classifying manufacturer', icon: '🔍', est: '~5s' },
+  { key: 'CHUNKING',       label: 'Smart chunking',          icon: '✂️', est: '~10s' },
+  { key: 'EMBEDDING',      label: 'Embedding chunks (CPU)',   icon: '🧠', est: '1-3 min' },
+  { key: 'EXTRACTING',     label: 'Extracting PM tasks',     icon: '⚙️', est: '~30s' },
+  { key: 'PENDING_REVIEW', label: 'Ready — awaiting review', icon: '✅', est: null },
+  { key: 'APPROVED',       label: 'Approved',                icon: '🎉', est: null },
 ];
 
 function renderPipelineSteps(currentStatus) {
   const currentIdx = PIPELINE_STEPS.findIndex(s => s.key === currentStatus);
-  return PIPELINE_STEPS.map((step, i) => {
+  const isFailed = currentStatus === 'FAILED';
+  const pct = isFailed ? 0 : Math.round((Math.max(currentIdx, 0) / (PIPELINE_STEPS.length - 1)) * 100);
+
+  const stepRows = PIPELINE_STEPS.map((step, i) => {
     let state = 'pending';
     if (i < currentIdx) state = 'done';
-    else if (i === currentIdx) state = 'active';
-    const color = state === 'done' ? 'var(--green)' : state === 'active' ? 'var(--navy)' : 'var(--grey-300)';
-    const textColor = state === 'pending' ? 'var(--grey-500)' : 'var(--text)';
-    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--grey-200)">
-      <span style="font-size:16px">${state === 'done' ? '✅' : state === 'active' ? '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>' : '⬜'}</span>
+    else if (i === currentIdx) state = isFailed ? 'failed' : 'active';
+    const textColor = state === 'pending' ? 'var(--grey-400)' : state === 'done' ? 'var(--grey-700)' : 'var(--text)';
+    const isTerminal = step.key === 'PENDING_REVIEW' || step.key === 'APPROVED';
+    const icon = state === 'done' ? '✅'
+               : state === 'active' ? (isTerminal ? '✅' : `<span class="spinner" style="width:13px;height:13px;border-width:2px;display:inline-block;vertical-align:middle"></span>`)
+               : state === 'failed' ? '❌'
+               : '⬜';
+    const badge = state === 'active'
+      ? (isTerminal
+          ? `<span class="badge badge-green" style="margin-left:auto;font-size:10px">READY</span>`
+          : `<span class="badge badge-amber" style="margin-left:auto;font-size:10px">${step.est ? 'est. ' + step.est : 'RUNNING'}</span>`)
+      : state === 'done' ? `<span style="margin-left:auto;font-size:11px;color:var(--green)">✓</span>` : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grey-200)">
+      <span style="min-width:18px;text-align:center">${icon}</span>
       <span style="font-size:13px;color:${textColor};font-weight:${state === 'active' ? '700' : '400'}">${step.icon} ${step.label}</span>
-      ${state === 'active' ? '<span class="badge badge-amber" style="margin-left:auto;font-size:10px">RUNNING</span>' : ''}
-      ${state === 'done' ? '<span style="margin-left:auto;font-size:11px;color:var(--green)">✓</span>' : ''}
+      ${badge}
     </div>`;
   }).join('');
+
+  const bar = `<div style="margin-top:12px">
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--grey-500);margin-bottom:4px">
+      <span id="pipelineElapsed">Elapsed: 0s</span>
+      <span>${pct}% complete</span>
+    </div>
+    <div style="background:var(--grey-200);border-radius:4px;height:6px;overflow:hidden">
+      <div style="background:${isFailed ? 'var(--red)' : 'var(--navy)'};height:100%;width:${pct}%;transition:width 0.4s ease;border-radius:4px"></div>
+    </div>
+  </div>`;
+
+  return stepRows + bar;
+}
+
+function _startElapsedTimer() {
+  if (_elapsedTimer) clearInterval(_elapsedTimer);
+  _pipelineStartTime = Date.now();
+  _elapsedTimer = setInterval(() => {
+    const el = document.getElementById('pipelineElapsed');
+    if (!el) return;
+    const secs = Math.floor((Date.now() - _pipelineStartTime) / 1000);
+    el.textContent = secs < 60 ? `Elapsed: ${secs}s` : `Elapsed: ${Math.floor(secs/60)}m ${secs%60}s`;
+  }, 1000);
+}
+
+function _stopElapsedTimer() {
+  if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null; }
 }
 
 async function submitUpload(e) {
@@ -640,6 +679,20 @@ async function submitUpload(e) {
   const alertEl = document.getElementById('uploadAlert');
   btn.disabled = true;
   btn.textContent = '⬆ Uploading...';
+
+  // Immediately show upload status in Step 2 — don't wait for HTTP response
+  const stepsEl = document.getElementById('pipelineSteps');
+  const badge = document.getElementById('pipelineStatusBadge');
+  if (stepsEl) stepsEl.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;padding:16px 0">
+      <span class="spinner" style="width:20px;height:20px;flex-shrink:0"></span>
+      <div>
+        <div style="font-size:13px;font-weight:700;color:var(--text)">Uploading PDF to server...</div>
+        <div style="font-size:12px;color:var(--grey-500);margin-top:3px">File transfer in progress</div>
+      </div>
+    </div>`;
+  if (badge) { badge.className = 'badge badge-amber'; badge.textContent = 'UPLOADING'; }
+  _startElapsedTimer();
   alertEl.innerHTML = '';
 
   const file = document.getElementById('upload-file').files[0];
@@ -665,14 +718,19 @@ async function submitUpload(e) {
     _currentManualId = data.manual_id;
 
     // Show progress panel
-    document.getElementById('pipelineProgress').style.display = 'block';
+    // pipelineProgress is always visible on the upload page
     document.getElementById('uploadForm').reset();
     btn.disabled = false;
     btn.textContent = '⬆ Upload & Start AI Processing';
 
-    // Start polling
+    // Start polling (elapsed timer already started before the fetch)
     _startPipelinePoller(_currentManualId);
   } catch(err) {
+    _stopElapsedTimer();
+    const stepsElErr = document.getElementById('pipelineSteps');
+    const badgeErr = document.getElementById('pipelineStatusBadge');
+    if (stepsElErr) stepsElErr.innerHTML = `<div style="padding:16px 0;color:var(--red);font-size:13px">❌ Upload failed — ${err.message}</div>`;
+    if (badgeErr) { badgeErr.className = 'badge badge-red'; badgeErr.textContent = 'FAILED'; }
     alertEl.innerHTML = `<div class="alert alert-danger">❌ ${err.message}</div>`;
     btn.disabled = false;
     btn.textContent = '⬆ Upload & Start AI Processing';
@@ -692,8 +750,9 @@ async function _pollPipelineStatus(manualId) {
     const data = await api(`/api/manual/uploads/${manualId}`);
     if (!data) return;
     _updatePipelineUI(data);
-    if (['APPROVED', 'FAILED'].includes(data.status)) {
+    if (['APPROVED', 'FAILED', 'PENDING_REVIEW'].includes(data.status)) {
       clearInterval(_pipelinePoller);
+      _stopElapsedTimer();
     }
   } catch(e) {
     console.warn('Pipeline poll error:', e);
@@ -737,7 +796,29 @@ function _updatePipelineUI(data) {
       const genSel = document.getElementById('gen-machine');
       if (genSel) Array.from(genSel.options).slice(1).forEach(o => sel.appendChild(o.cloneNode(true)));
     }
-    if (data.machine_id && sel) sel.value = data.machine_id;
+    if (data.machine_id && sel) {
+      sel.value = data.machine_id;
+    } else if (sel && data.detected_manufacturer) {
+      // Auto-select the best matching machine based on detected manufacturer
+      const mfr = (data.detected_manufacturer || '').toLowerCase();
+      const model = (data.detected_model || '').toLowerCase();
+      let bestOption = null;
+      for (const opt of sel.options) {
+        if (!opt.value) continue;
+        const label = opt.text.toLowerCase();
+        if (mfr.includes('eisbar') || mfr.includes('eisbär')) {
+          if (label.includes('eisb') || label.includes('dehumidifier')) { bestOption = opt; break; }
+        } else if (mfr.includes('krones')) {
+          if (model.includes('contiform') && label.includes('contiform')) { bestOption = opt; break; }
+          if (model.includes('variopac') && label.includes('variopac')) { bestOption = opt; break; }
+          if (model.includes('shrink') && label.includes('shrink')) { bestOption = opt; break; }
+          if (!bestOption && label.includes('krones')) bestOption = opt;
+        } else if (mfr.includes('tetra')) {
+          if (label.includes('tetra') || label.includes('aseptic')) { bestOption = opt; break; }
+        }
+      }
+      if (bestOption) sel.value = bestOption.value;
+    }
 
     // Show extracted tasks preview
     const tasksEl = document.getElementById('reviewTasksList');
@@ -770,19 +851,110 @@ function _updatePipelineUI(data) {
 
 function loadIntervalButtons(machineId) {
   if (!machineId) return;
-  api(`/api/library/${machineId}/intervals 2>/dev/null`).catch(() => null); // graceful
+  // Populate the inline interval dropdown in generateCard
   api('/api/library').then(lib => {
     if (!lib) return;
     const machine = lib.machines.find(m => m.machine_id === machineId);
     if (!machine) return;
-    const container = document.getElementById('generateIntervalButtons');
-    if (!container) return;
-    container.innerHTML = machine.intervals.filter(iv => iv.task_count > 0).map(iv =>
-      `<button class="btn btn-primary btn-sm" onclick="quickGenerate('${machineId}',${iv.hours})">
-        Generate ${iv.label} PM (${iv.task_count} tasks)
-      </button>`
-    ).join('');
+    const sel = document.getElementById('gen2-interval');
+    if (sel) {
+      sel.innerHTML = '<option value="">Select interval...</option>';
+      machine.intervals.filter(iv => iv.task_count > 0).forEach(iv => {
+        const opt = document.createElement('option');
+        opt.value = iv.hours;
+        opt.textContent = `${iv.label} (${iv.natural_label}) — ${iv.task_count} tasks`;
+        sel.appendChild(opt);
+      });
+    }
+    const hiddenMach = document.getElementById('gen2-machine');
+    if (hiddenMach) hiddenMach.value = machineId;
   }).catch(() => null);
+}
+
+async function submitGenerate2(e) {
+  e.preventDefault();
+  const btn = document.getElementById('gen2Btn');
+  const alertEl = document.getElementById('genAlert2');
+  const result = document.getElementById('genResult2');
+  result.style.display = 'none';
+  alertEl.innerHTML = '';
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating...';
+  showLoading('Generating Excel checklist — please wait...');
+
+  const payload = {
+    machine_id: document.getElementById('gen2-machine').value,
+    interval_hours: parseInt(document.getElementById('gen2-interval').value),
+    work_order: document.getElementById('gen2-wo').value,
+    technician_name: document.getElementById('gen2-tech').value,
+    output_format: document.getElementById('gen2-format').value,
+  };
+
+  try {
+    const data = await api('/api/generate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (!data) throw new Error('No response from server');
+
+    hideLoading();
+    btn.disabled = false;
+    btn.textContent = '⬇ Generate & Download Excel';
+
+    result.style.display = 'block';
+    document.getElementById('genSuccess2').innerHTML = `
+      ✅ <strong>Generated successfully!</strong> &nbsp;${data.task_count} tasks · ${(data.file_size_bytes / 1024).toFixed(1)} KB
+    `;
+    const link = document.getElementById('genDownloadLink2');
+    link.href = makeDownloadUrl(data.download_url);
+    link.textContent = `⬇ Download ${data.output_format?.toUpperCase() || 'XLSX'}`;
+    link.click(); // auto-trigger download
+  } catch(err) {
+    hideLoading();
+    btn.disabled = false;
+    btn.textContent = '⬇ Generate & Download Excel';
+    alertEl.innerHTML = `<div class="alert alert-danger">❌ ${err.message}</div>`;
+  }
+}
+
+async function generateZip() {
+  if (!_currentManualId) return;
+  const machineId = document.getElementById('review-machine-select')?.value || '';
+  const btn = document.getElementById('generateZipBtn');
+  const alertEl = document.getElementById('zipAlert');
+  alertEl.innerHTML = '';
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating ZIP...';
+  try {
+    const token = await getFreshToken();
+    const qs = machineId ? `?machine_id=${encodeURIComponent(machineId)}` : '';
+    const res = await fetch(`${API}/api/manual/uploads/${_currentManualId}/generate-zip${qs}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Generation failed' }));
+      throw new Error(err.detail || 'Generation failed');
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const filename = cd.match(/filename="([^"]+)"/)?.[1] || 'PM_output.zip';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    btn.textContent = `✅ Downloaded — ${filename}`;
+    btn.disabled = false;
+    alertEl.innerHTML = `<div class="alert alert-success" style="font-size:12px">✅ <strong>${filename}</strong> downloaded — check your Downloads folder.</div>`;
+  } catch(err) {
+    btn.textContent = '⬇ Generate PM Checklists (ZIP)';
+    btn.disabled = false;
+    alertEl.innerHTML = `<div class="alert alert-danger" style="font-size:12px">❌ ${err.message}</div>`;
+  }
 }
 
 async function approvePipeline() {
@@ -837,8 +1009,11 @@ async function loadUploads() {
       tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><p>No uploads yet</p></div></td></tr>`;
       return;
     }
+    document.getElementById('uploadSelectAll').checked = false;
+    document.getElementById('uploadDeleteBtn').style.display = 'none';
     tbody.innerHTML = uploads.map(u => `
       <tr>
+        <td><input type="checkbox" class="upload-check" value="${u.manual_id}" onchange="updateDeleteBtn('uploadQueueBody','uploadDeleteBtn')" /></td>
         <td style="font-size:12px">${u.filename}</td>
         <td>${u.machine_id || '—'}</td>
         <td>${pipelineBadge(u.status)}</td>
@@ -860,13 +1035,14 @@ async function loadUploads() {
 
 async function resumePipelineReview(manualId) {
   _currentManualId = manualId;
-  document.getElementById('pipelineProgress').style.display = 'block';
+  // pipelineProgress is always visible on the upload page
   _pollPipelineStatus(manualId);
 }
 
 async function refreshUploadStatus(manualId) {
   _currentManualId = manualId;
-  document.getElementById('pipelineProgress').style.display = 'block';
+  // pipelineProgress is always visible on the upload page
+  _startElapsedTimer();
   _startPipelinePoller(manualId);
 }
 
@@ -969,9 +1145,9 @@ async function _downloadFromApi(url) {
   }
 }
 
-function exportHistory() {
-  const machineId = document.getElementById('export-machine')?.value || '';
-  const url = '/api/export/history/csv' + (machineId ? `?machine_id=${machineId}` : '');
+function exportHistory(machineId) {
+  const mid = machineId !== undefined ? machineId : (document.getElementById('export-machine')?.value || '');
+  const url = '/api/export/history/csv' + (mid ? `?machine_id=${mid}` : '');
   _downloadFromApi(url);
 }
 
@@ -983,19 +1159,86 @@ function exportAuditLog() {
   _downloadFromApi('/api/export/audit-logs/csv');
 }
 
-// Also populate the export machine filter
-document.addEventListener('DOMContentLoaded', () => {
-  setTimeout(() => {
-    const exportSel = document.getElementById('export-machine');
-    const genSel = document.getElementById('gen-machine');
-    if (exportSel && genSel) {
-      Array.from(genSel.options).slice(1).forEach(opt => {
-        exportSel.appendChild(opt.cloneNode(true));
-      });
-    }
-  }, 2000);
-});
+async function loadExportPage() {
+  const container = document.getElementById('exportMachineList');
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
 
+  try {
+    // Load machines that have actual PM records
+    const [libData, histData] = await Promise.all([
+      api('/api/library'),
+      api('/api/history?limit=500'),
+    ]);
+    if (!libData || !histData) return;
+
+    // Build set of machine IDs that have at least one PM record
+    const activeIds = new Set(histData.records.map(r => r.machine_id));
+    const activeMachines = (libData.machines || []).filter(m => activeIds.has(m.machine_id));
+
+    if (activeMachines.length === 0) {
+      container.innerHTML = `<div class="empty-state" style="padding:32px">
+        <div class="empty-icon">📂</div>
+        <p>No processed PM documents yet.<br/>Upload a manual and generate a checklist first.</p>
+      </div>`;
+      return;
+    }
+
+    container.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:16px">
+      ${activeMachines.map(m => {
+        const count = histData.records.filter(r => r.machine_id === m.machine_id).length;
+        return `<div style="background:var(--grey-100);border:1px solid var(--grey-300);border-radius:8px;padding:16px">
+          <div style="font-weight:700;color:var(--navy);margin-bottom:4px">${m.name}</div>
+          <div style="font-size:12px;color:var(--grey-500);margin-bottom:12px">${m.manufacturer || ''} · ${count} document(s)</div>
+          <button class="btn btn-primary btn-sm" style="width:100%" onclick="exportHistory('${m.machine_id}')">
+            ⬇ Export ${m.name} CSV
+          </button>
+        </div>`;
+      }).join('')}
+    </div>`;
+  } catch(e) {
+    container.innerHTML = `<div class="alert alert-danger" style="margin:16px">${e.message}</div>`;
+  }
+}
+
+
+// ─── Select / Delete helpers ─────────────────────────────────────────────────
+
+function toggleSelectAll(tbodyId, checkAllId, btnId) {
+  const checked = document.getElementById(checkAllId).checked;
+  document.querySelectorAll(`#${tbodyId} input[type="checkbox"]`).forEach(cb => cb.checked = checked);
+  document.getElementById(btnId).style.display = checked ? 'inline-block' : 'none';
+}
+
+function updateDeleteBtn(tbodyId, btnId) {
+  const any = [...document.querySelectorAll(`#${tbodyId} input[type="checkbox"]`)].some(cb => cb.checked);
+  document.getElementById(btnId).style.display = any ? 'inline-block' : 'none';
+}
+
+async function deleteSelectedHistory() {
+  const ids = [...document.querySelectorAll('#historyBody input[type="checkbox"]:checked')].map(cb => cb.value);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} PM record(s)? This cannot be undone.`)) return;
+  try {
+    await api('/api/history', { method: 'DELETE', body: JSON.stringify(ids) });
+    loadHistory();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+async function deleteSelectedUploads() {
+  const ids = [...document.querySelectorAll('#uploadQueueBody input[type="checkbox"]:checked')].map(cb => cb.value);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} upload(s)? This cannot be undone.`)) return;
+  let failed = 0;
+  for (const id of ids) {
+    try {
+      const token = await getFreshToken();
+      await fetch(API + `/api/manual/uploads/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
+    } catch { failed++; }
+  }
+  if (failed) alert(`${failed} deletion(s) failed.`);
+  loadUploads();
+}
 
 // ─── Fill Checklist (Technician) ─────────────────────────────────────────────
 

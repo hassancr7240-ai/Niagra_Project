@@ -209,6 +209,15 @@ async def get_upload_status(manual_id: str, user: CurrentUserDep, db: DBDep) -> 
     }
 
 
+@router.delete("/uploads/{manual_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_upload(manual_id: str, user: CurrentUserDep, db: DBDep) -> None:
+    """Delete a manual upload record."""
+    user.require("manual:upload")
+    deleted = await crud.delete_manual_upload(db, manual_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+
+
 @router.post("/uploads/{manual_id}/approve", response_model=dict)
 async def approve_extracted_tasks(
     manual_id: str,
@@ -308,6 +317,67 @@ async def approve_extracted_tasks(
         "tasks_added_to_library": added_count,
         "status": "APPROVED",
     }
+
+
+@router.get("/uploads/{manual_id}/generate-zip")
+async def generate_zip_download(
+    manual_id: str,
+    user: CurrentUserDep,
+    db: DBDep,
+    machine_id: Optional[str] = None,
+):
+    """
+    GET /api/manual/uploads/{manual_id}/generate-zip?machine_id=...
+    Streams a ZIP file containing one CON L3 XLSX per PM interval.
+    No approval required — works directly from PENDING_REVIEW state.
+    """
+    from fastapi.responses import Response
+    from app.core.document_generator import generate_con_l3_zip_bytes
+
+    user.require("manual:upload")
+
+    upload = await crud.get_manual_upload(db, manual_id)
+    if not upload or upload.status not in ("PENDING_REVIEW", "APPROVED"):
+        raise HTTPException(status_code=400, detail="Manual not ready for generation")
+
+    raw_tasks = json.loads(upload.extracted_tasks or "[]")
+    if not raw_tasks:
+        raise HTTPException(status_code=404, detail="No extracted tasks found")
+
+    # Resolve machine name: prefer selected machine from DB, fall back to detected manufacturer
+    mid = machine_id or upload.machine_id
+    machine_display_name = None
+    effective_machine_id = mid or ""
+    if mid:
+        machine = await crud.get_machine(db, mid)
+        if machine:
+            machine_display_name = machine.name
+            effective_machine_id = machine.machine_id
+    if not machine_display_name:
+        machine_display_name = (
+            upload.detected_manufacturer
+            or Path(upload.original_filename).stem.replace("_", " ").replace("-", " ")
+            or "EQUIPMENT"
+        )
+
+    tasks = [
+        {
+            "task_no": t.get("task_no", (i + 1) * 10),
+            "area": t.get("area", "GENERAL"),
+            "action": t.get("action", "CHECK"),
+            "description": t.get("description", ""),
+            "interval_hours": int(t.get("interval_hours", 0) or 0),
+        }
+        for i, t in enumerate(raw_tasks)
+    ]
+
+    zip_bytes, zip_filename = generate_con_l3_zip_bytes(effective_machine_id, machine_display_name, tasks)
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )
 
 
 @router.post("/uploads/{manual_id}/generate-xlsx", response_model=dict)
@@ -429,21 +499,43 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     settings = get_settings()
 
     update_fn("CLASSIFYING")
-    log.info("[%s] Extracting text from PDF", manual_id)
-    full_text, page_offsets = extract_text_from_pdf(pdf_path)
-    sample_text = full_text[:8000]
+    log.info("[%s] Extracting text + chunking in parallel (both non-blocking)", manual_id)
 
-    classification = await classify_manual(pdf_path, sample_text)
+    # Both text extraction and chunking run in thread pool simultaneously
+    # extract_text_from_pdf is capped at 60 pages so it finishes in ~10s
+    chunk_task = asyncio.ensure_future(
+        asyncio.to_thread(
+            smart_chunk_pdf,
+            pdf_path,
+            pdf_path.name,
+            settings.rag_max_section_words,
+            settings.rag_min_section_words,
+        )
+    )
+    text_task = asyncio.ensure_future(
+        asyncio.to_thread(extract_text_from_pdf, pdf_path)
+    )
+
+    # Wait for text extraction first (fast — 60-page cap), then classify
+    full_text, _offsets = await text_task
+    sample_text = full_text[:15000]
+
+    # Classify finishes in ~5s; wrap with timeout so a crashed Ollama can't hang forever
+    try:
+        classification = await asyncio.wait_for(
+            classify_manual(pdf_path, sample_text), timeout=30
+        )
+    except asyncio.TimeoutError:
+        log.warning("[%s] Classification timed out — using keyword fallback", manual_id)
+        from app.rag.classifier import _keyword_classify
+        classification = _keyword_classify(sample_text)
+
     log.info("[%s] Classified: %s %s", manual_id, classification.manufacturer, classification.model)
 
-    # Structure-aware chunking: table rows → sections → checkbox items → fallback
+    # Update to CHUNKING — user sees the pipeline advance while the thread finishes
     update_fn("CHUNKING")
-    chunks = smart_chunk_pdf(
-        pdf_path,
-        source_file=pdf_path.name,
-        max_section_words=settings.rag_max_section_words,
-        min_section_words=settings.rag_min_section_words,
-    )
+    chunks = await chunk_task
+
     type_summary = ', '.join(
         f'{t}={sum(1 for c in chunks if c.chunk_type == t)}'
         for t in dict.fromkeys(c.chunk_type for c in chunks)
@@ -451,21 +543,32 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] Smart chunking: %d chunks (%s)", manual_id, len(chunks), type_summary)
 
     update_fn("EMBEDDING")
-    embedded = await embed_chunks(chunks)
-    log.info("[%s] Embedded %d chunks", manual_id, len(embedded))
-
-    if embedded:
-        await index_chunks(embedded, manual_id)
-
-    update_fn("EXTRACTING")
-    # Semantic retrieval for best maintenance chunks
-    query_text = "maintenance tasks inspection intervals lubrication replacement safety lockout cleaning filter belt schedule"
-    query_chunk = [TextChunk(chunk_id="q", text=query_text, page_start=0, page_end=0, char_start=0, char_end=len(query_text), source_file="")]
-    q_embedded = await embed_chunks(query_chunk)
-    if q_embedded:
-        top_chunks = await retrieve_top_k(q_embedded[0]["embedding"], manual_id=manual_id, top_k=10)
+    if settings.ai_provider != "watsonx":
+        # Local dev fast path: skip embedding — select chunks directly by structure type
+        from app.rag.pipeline import _select_top_chunks_by_type
+        top_chunks = _select_top_chunks_by_type(chunks, settings.rag_top_k)
+        embedded = []
+        log.info("[%s] Local dev: skipping embedding — selected %d chunks by type",
+                 manual_id, len(top_chunks))
     else:
-        top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0), "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")} for e in embedded[:10]]
+        # Production watsonx: full embed + index + semantic retrieval
+        priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
+        others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
+        embed_subset = (priority + others)[:200]
+        embedded = await embed_chunks(embed_subset)
+        log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
+        if embedded:
+            await index_chunks(embedded, manual_id)
+        proxy = next(
+            (e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")),
+            embedded[0] if embedded else None,
+        )
+        if proxy:
+            top_chunks = await retrieve_top_k(proxy["embedding"], manual_id=manual_id, top_k=10)
+        else:
+            top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0),
+                           "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
+                          for e in embedded[:10]]
 
     from app.rag.pipeline import _guess_intervals
     # Merge manufacturer defaults with intervals detected from document structure

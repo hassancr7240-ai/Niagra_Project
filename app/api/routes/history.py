@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
 
 from app.core.analytics import analyse_pm_patterns
 from app.core.history_module import build_dashboard, _pm_record_to_response
@@ -163,3 +163,36 @@ async def approve_pm_record(
     )
 
     return await _pm_record_to_response(db, updated)
+
+
+@router.delete("/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_pm_record(
+    record_id: str,
+    user: CurrentUserDep,
+    db: DBDep,
+) -> None:
+    """Delete a PM record (Manager/Supervisor only)."""
+    user.require("pm:approve")
+    deleted = await crud.delete_pm_record(db, record_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Record not found")
+    await log_action(
+        db, action="PM_RECORD_DELETED", user_id=user.user_id, user_email=user.email,
+        resource_type="pm_record", resource_id=record_id,
+        details={"deleted_by": user.email}, ip_address=user.ip_address,
+    )
+
+
+@router.delete("", status_code=status.HTTP_200_OK)
+async def delete_pm_records_bulk(
+    record_ids: list[str] = Body(...),
+    user: CurrentUserDep = None,
+    db: DBDep = None,
+) -> dict:
+    """Bulk delete PM records by list of record_ids."""
+    user.require("pm:approve")
+    count = 0
+    for rid in record_ids:
+        if await crud.delete_pm_record(db, rid):
+            count += 1
+    return {"deleted": count}

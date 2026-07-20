@@ -4,15 +4,17 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update, func, and_, desc
+from sqlalchemy import select, update, delete, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models import (
     AuditLog,
+    Citation,
     CompletedTask,
     Machine,
     MachineHours,
+    ManualApproval,
     ManualUpload,
     PMInterval,
     PMRecord,
@@ -146,6 +148,14 @@ async def update_pm_record(db: AsyncSession, record_id: str, data: dict) -> Opti
     return await get_pm_record(db, record_id)
 
 
+async def delete_pm_record(db: AsyncSession, record_id: str) -> bool:
+    result = await db.execute(
+        delete(PMRecord).where(PMRecord.record_id == record_id)
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
 async def get_pm_history(
     db: AsyncSession,
     machine_id: Optional[str] = None,
@@ -277,6 +287,14 @@ async def get_manual_upload(db: AsyncSession, manual_id: str) -> Optional[Manual
     return result.scalar_one_or_none()
 
 
+async def delete_manual_upload(db: AsyncSession, manual_id: str) -> bool:
+    result = await db.execute(
+        delete(ManualUpload).where(ManualUpload.manual_id == manual_id)
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
 async def update_manual_upload(db: AsyncSession, manual_id: str, data: dict) -> Optional[ManualUpload]:
     await db.execute(
         update(ManualUpload).where(ManualUpload.manual_id == manual_id).values(**data)
@@ -293,3 +311,77 @@ async def get_manual_uploads(
     q = q.order_by(desc(ManualUpload.created_at)).limit(limit)
     result = await db.execute(q)
     return list(result.scalars().all())
+
+
+# ─── Citations ────────────────────────────────────────────────────────────────
+
+async def save_citations(db: AsyncSession, citations: list[dict]) -> int:
+    """Bulk-insert citation records. Returns number inserted."""
+    if not citations:
+        return 0
+    objs = [Citation(**c) for c in citations]
+    db.add_all(objs)
+    await db.flush()
+    return len(objs)
+
+
+async def get_citations_for_manual(
+    db: AsyncSession, manual_id: str
+) -> list[Citation]:
+    result = await db.execute(
+        select(Citation)
+        .where(Citation.manual_id == manual_id)
+        .order_by(Citation.page_start)
+    )
+    return list(result.scalars().all())
+
+
+async def get_citations_by_content_type(
+    db: AsyncSession, manual_id: str, content_type: str
+) -> list[Citation]:
+    result = await db.execute(
+        select(Citation)
+        .where(
+            and_(Citation.manual_id == manual_id, Citation.content_type == content_type)
+        )
+        .order_by(Citation.page_start)
+    )
+    return list(result.scalars().all())
+
+
+# ─── Manual Approvals ─────────────────────────────────────────────────────────
+
+async def save_manual_approval(db: AsyncSession, data: dict) -> ManualApproval:
+    obj = ManualApproval(**data)
+    db.add(obj)
+    await db.flush()
+    return obj
+
+
+async def get_manual_approvals(
+    db: AsyncSession, manual_id: str
+) -> list[ManualApproval]:
+    result = await db.execute(
+        select(ManualApproval)
+        .where(ManualApproval.manual_id == manual_id)
+        .order_by(desc(ManualApproval.created_at))
+    )
+    return list(result.scalars().all())
+
+
+async def get_approval_for_interval(
+    db: AsyncSession, manual_id: str, interval_hours: int
+) -> Optional[ManualApproval]:
+    """Get the latest approval/rejection for a specific interval of a manual."""
+    result = await db.execute(
+        select(ManualApproval)
+        .where(
+            and_(
+                ManualApproval.manual_id == manual_id,
+                ManualApproval.interval_hours == interval_hours,
+            )
+        )
+        .order_by(desc(ManualApproval.created_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()

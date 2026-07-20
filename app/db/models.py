@@ -232,3 +232,38 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped[ChatSession] = relationship("ChatSession", back_populates="messages")
+
+
+class Citation(Base):
+    """Tracks which page/section each extracted chunk came from — enables clickable citations in UI."""
+
+    __tablename__ = "citations"
+
+    citation_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    manual_id: Mapped[str] = mapped_column(String(64), ForeignKey("manual_uploads.manual_id"))
+    chunk_id: Mapped[str] = mapped_column(String(128))
+    page_start: Mapped[int] = mapped_column(Integer)
+    page_end: Mapped[int] = mapped_column(Integer)
+    section: Mapped[Optional[str]] = mapped_column(String(256))
+    # procedure | warning | loto | ppe | parts_list | startup | toc | table
+    content_type: Mapped[str] = mapped_column(String(32), default="procedure")
+    text_excerpt: Mapped[Optional[str]] = mapped_column(Text)  # first 500 chars for preview
+    manual_version: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ManualApproval(Base):
+    """Records engineer approve/reject decisions per manual per interval."""
+
+    __tablename__ = "manual_approvals"
+
+    approval_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    manual_id: Mapped[str] = mapped_column(String(64), ForeignKey("manual_uploads.manual_id"))
+    # 0 means approval applies to all intervals
+    interval_hours: Mapped[int] = mapped_column(Integer, default=0)
+    # APPROVED | REJECTED
+    status: Mapped[str] = mapped_column(String(16))
+    comment: Mapped[Optional[str]] = mapped_column(Text)  # required when REJECTED
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(128))
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

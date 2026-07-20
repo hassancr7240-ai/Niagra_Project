@@ -17,6 +17,21 @@ from app.rag.embedder import embed_chunks
 from app.rag.extractor import extract_tasks_from_chunks
 from app.rag.retriever import index_chunks, retrieve_top_k
 
+# ── 8-Pass retrieval config ────────────────────────────────────────────────────
+# Each pass targets a specific content type. For local dev, filters by content_type.
+# For production (Azure AI Search), these become separate hybrid search queries.
+_RETRIEVAL_PASSES: list[tuple[str, str, int]] = [
+    # (pass_name, content_type_filter, max_chunks_per_pass)
+    ("toc_schedule",  "toc",        4),
+    ("warnings",      "warning",    5),
+    ("loto",          "loto",       4),
+    ("interval",      "table",     15),   # interval tasks — table_row + checkbox get priority
+    ("ppe_tools",     "ppe",        4),
+    ("startup",       "startup",    4),
+    ("parts",         "parts_list", 5),
+    ("coverage",      "procedure", 10),   # final sweep — best remaining procedure chunks
+]
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -49,56 +64,80 @@ async def run_pipeline(
     try:
         # ── Stage A: Ingest & Process ─────────────────────────────────────
 
-        # Step 1: Extract text from PDF
         await _update_status(db, manual_id, "CLASSIFYING")
-        logger.info("[%s] Extracting text from PDF", manual_id)
-        full_text, page_offsets = extract_text_from_pdf(pdf_path)
-        sample_text = full_text[:8000]
+        logger.info("[%s] Starting text extraction + chunking (both in thread pool)", manual_id)
 
-        # Step 2: Pre-Classify (Krones/Other)
-        classification = await classify_manual(pdf_path, sample_text)
+        # Both run in thread pool simultaneously — neither blocks the event loop
+        # extract_text_from_pdf is capped at 60 pages → finishes in ~10s
+        source_name = pdf_path.name
+        text_task = asyncio.ensure_future(
+            asyncio.to_thread(extract_text_from_pdf, pdf_path)
+        )
+        chunk_task = asyncio.ensure_future(
+            asyncio.to_thread(
+                smart_chunk_pdf, pdf_path, source_name,
+                settings.rag_max_section_words, settings.rag_min_section_words,
+                manual_id, "",  # manual_id passed so every chunk carries it; version unknown at chunk time
+            )
+        )
+        # Wait for text extraction (fast — capped at 60 pages), then classify
+        full_text, _offsets = await text_task
+        sample_text = full_text[:15000]
+
+        try:
+            classification = await asyncio.wait_for(
+                classify_manual(pdf_path, sample_text), timeout=30
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] Classification timed out — using keyword fallback", manual_id)
+            from app.rag.classifier import _keyword_classify
+            classification = _keyword_classify(sample_text)
+
+        await _update_status(db, manual_id, "CHUNKING")
+        chunks = await chunk_task
         results["manufacturer"] = classification.manufacturer
         results["model"] = classification.model
         results["machine_type"] = classification.machine_type
         results["detected_chapters"] = classification.detected_chapters
-        logger.info("[%s] Classified: %s %s (chapters=%s)", manual_id,
-                    classification.manufacturer, classification.model, classification.detected_chapters)
-
-        # Step 3: Structure-aware PDF chunking
-        await _update_status(db, manual_id, "CHUNKING")
-        source_name = pdf_path.name
-        chunks = smart_chunk_pdf(
-            pdf_path,
-            source_file=source_name,
-            max_section_words=settings.rag_max_section_words,
-            min_section_words=settings.rag_min_section_words,
-        )
         results["chunk_count"] = len(chunks)
         type_summary = ', '.join(
             f'{t}={sum(1 for c in chunks if c.chunk_type == t)}'
             for t in dict.fromkeys(c.chunk_type for c in chunks)
         )
-        logger.info("[%s] Smart chunking: %d chunks (%s)", manual_id, len(chunks), type_summary)
+        logger.info("[%s] Classified: %s %s | %d chunks (%s)", manual_id,
+                    classification.manufacturer, classification.model, len(chunks), type_summary)
 
-        # Step 5: Embed Chunks → text-embedding-3
+        # ── Stage B: Select/Embed → Retrieve → Extract ───────────────────
+
         await _update_status(db, manual_id, "EMBEDDING")
-        embedded = await embed_chunks(chunks)
-        logger.info("[%s] Embedded %d chunks", manual_id, len(embedded))
 
-        # ── Stage B: Extract & Output ─────────────────────────────────────
-
-        # Step 6: Store in Vector Store (Azure AI Search)
-        if embedded:
-            await index_chunks(embedded, manual_id)
-
-        # Step 7: RAG Retrieve — Top 10 chunks for task extraction query
-        await _update_status(db, manual_id, "EXTRACTING")
-        top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
-
-        # Step 8: AI Extraction → structured JSON
         # Merge manufacturer defaults with intervals detected from document structure
         chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
         interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
+
+        if settings.ai_provider != "watsonx":
+            # Local dev fast path: skip embedding — use 8-pass content_type filtering instead
+            top_chunks = _retrieve_8_pass_local(chunks, interval_hints)
+            if not top_chunks:
+                top_chunks = _select_top_chunks_by_type(chunks, settings.rag_top_k)
+            embedded = []
+            logger.info("[%s] Local dev 8-pass: selected %d chunks across %d passes",
+                        manual_id, len(top_chunks), len(_RETRIEVAL_PASSES))
+        else:
+            # Production: full embed + index + Azure AI Search hybrid retrieval
+            priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
+            others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
+            embed_subset = (priority + others)[:200]
+            logger.info("[%s] Embedding %d/%d chunks", manual_id, len(embed_subset), len(chunks))
+            embedded = await embed_chunks(embed_subset)
+            logger.info("[%s] Embedded %d chunks", manual_id, len(embedded))
+            if embedded:
+                await index_chunks(embedded, manual_id)
+            top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
+
+        await _update_status(db, manual_id, "EXTRACTING")
+
+        # AI Extraction → structured JSON tasks
         extracted_tasks = await extract_tasks_from_chunks(
             top_chunks or _to_chunk_dicts(embedded[:10]),
             manufacturer=classification.manufacturer,
@@ -106,16 +145,34 @@ async def run_pipeline(
             interval_hints=interval_hints,
         )
 
-        # Step 8b: Fallback — if AI returned 0 tasks, try direct table
-        # extraction from the PDF (handles PMRSPL-style tabular manuals
-        # like Tetra Pak where the small AI model can't parse the format)
+        # Fallback — if AI returned 0 tasks, try direct table extraction
+        # (handles PMRSPL-style tabular manuals like Tetra Pak)
         if not extracted_tasks:
             logger.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
             extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
             if extracted_tasks:
                 logger.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
-        # Step 9: Validate JSON schema
+        # Save citations — one record per top chunk so UI can show page/section links
+        citation_records = [
+            {
+                "manual_id": manual_id,
+                "chunk_id": c.get("chunk_id", ""),
+                "page_start": c.get("page_start", 0),
+                "page_end": c.get("page_end", 0),
+                "section": c.get("section", ""),
+                "content_type": c.get("content_type", "procedure"),
+                "text_excerpt": c.get("text", "")[:500],
+                "manual_version": c.get("manual_version", ""),
+            }
+            for c in top_chunks
+            if c.get("page_start", 0) > 0  # skip chunks with no page info
+        ]
+        if citation_records:
+            saved = await crud.save_citations(db, citation_records)
+            await db.commit()
+            logger.info("[%s] Saved %d citations", manual_id, saved)
+
         results["extracted_tasks"] = extracted_tasks
         results["status"] = "PENDING_REVIEW"
 
@@ -152,12 +209,34 @@ async def _retrieve_maintenance_chunks(
 ) -> list[dict]:
     """
     Retrieve the top maintenance-relevant chunks by cosine similarity.
-    Uses the vector store (local SQLite or Azure) — always semantic, never positional.
+    Skips an extra embed call by picking a pre-embedded chunk as the query proxy,
+    falling back to a separate embed only when no table/checkbox chunks exist.
     """
     if not embedded:
         return []
 
-    # Embed a maintenance-focused query to find the most relevant sections
+    # Fast path: use a table_row or checkbox chunk's own embedding as the query proxy
+    # (these chunks already represent maintenance content precisely)
+    proxy = next(
+        (e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")),
+        None,
+    )
+
+    if proxy:
+        try:
+            top_chunks = await retrieve_top_k(
+                query_embedding=proxy["embedding"],
+                manual_id=manual_id,
+                top_k=settings.rag_top_k,
+            )
+            if top_chunks:
+                logger.info("[%s] Retrieved %d chunks via proxy embedding (no extra embed call)",
+                            manual_id, len(top_chunks))
+                return top_chunks
+        except Exception as exc:
+            logger.warning("[%s] Proxy retrieval failed: %s", manual_id, exc)
+
+    # Slow path: embed a dedicated query string (only when no structured chunks exist)
     query_text = (
         "preventive maintenance tasks inspection intervals lubrication replacement "
         "safety lockout LOTO cleaning filter belt bearing grease oil schedule checklist"
@@ -178,13 +257,106 @@ async def _retrieve_maintenance_chunks(
             top_k=settings.rag_top_k,
         )
         if top_chunks:
-            logger.info("[%s] Retrieved %d maintenance-relevant chunks via semantic search", manual_id, len(top_chunks))
+            logger.info("[%s] Retrieved %d chunks via dedicated query embedding", manual_id, len(top_chunks))
             return top_chunks
     except Exception as exc:
         logger.warning("[%s] Semantic retrieval failed, using positional fallback: %s", manual_id, exc)
 
-    # Only reach here if embedding/retrieval completely failed
     return _to_chunk_dicts(embedded[:10])
+
+
+def _retrieve_8_pass_local(
+    chunks: list[TextChunk],
+    interval_hints: list[int],
+) -> list[dict]:
+    """
+    8-pass retrieval for local dev (no Azure AI Search).
+    Mirrors the production strategy but filters by content_type + chunk_type
+    instead of running semantic queries against Azure AI Search.
+
+    Production equivalent: each pass becomes a separate hybrid BM25+semantic
+    query against the Azure AI Search index with a content_type filter.
+    """
+    selected: list[dict] = []
+    seen_ids: set[str] = set()
+
+    def _chunk_to_dict(c: TextChunk) -> dict:
+        return {
+            "text": c.text,
+            "page_start": c.page_start,
+            "page_end": c.page_end,
+            "section": c.section_heading,
+            "content_type": c.content_type,
+            "source_file": c.source_file,
+            "chunk_id": c.chunk_id,
+            "manual_id": c.manual_id,
+            "manual_version": c.manual_version,
+        }
+
+    def _add(subset: list[TextChunk], max_n: int) -> None:
+        for c in subset:
+            if len([x for x in selected if x.get("content_type") == c.content_type]) >= max_n:
+                break
+            if c.chunk_id not in seen_ids:
+                seen_ids.add(c.chunk_id)
+                selected.append(_chunk_to_dict(c))
+
+    by_content: dict[str, list[TextChunk]] = {}
+    for c in chunks:
+        by_content.setdefault(c.content_type, []).append(c)
+
+    for pass_name, content_type, max_n in _RETRIEVAL_PASSES:
+        if content_type == "table":
+            # Pass 4 — interval tasks: table_row + checkbox chunks matching detected intervals
+            interval_chunks = [
+                c for c in chunks
+                if c.chunk_type in ("table_row", "checkbox")
+                and c.chunk_id not in seen_ids
+            ]
+            # Prioritise chunks whose interval_hint matches what we're looking for
+            interval_chunks.sort(
+                key=lambda c: (c.interval_hint not in interval_hints if interval_hints else False,
+                               c.chunk_type != "table_row"),
+            )
+            _add(interval_chunks, max_n)
+        elif content_type == "procedure":
+            # Pass 8 — coverage sweep: best remaining section/paragraph chunks
+            remaining = [
+                c for c in chunks
+                if c.chunk_id not in seen_ids
+                and c.chunk_type in ("section", "paragraph", "checkbox")
+            ]
+            _add(remaining, max_n)
+        else:
+            _add(by_content.get(content_type, []), max_n)
+
+        logger.debug("[8-pass] %s → %d total selected so far", pass_name, len(selected))
+
+    logger.info("[8-pass] Final: %d chunks from %d passes", len(selected), len(_RETRIEVAL_PASSES))
+    return selected
+
+
+def _select_top_chunks_by_type(chunks: list, top_k: int) -> list[dict]:
+    """
+    Legacy local dev fast path — kept as ultimate fallback if 8-pass returns nothing.
+    Priority: table_row → checkbox → section → paragraph → text
+    """
+    order = ("table_row", "checkbox", "section", "paragraph", "text")
+    by_type: dict[str, list] = {}
+    for c in chunks:
+        by_type.setdefault(c.chunk_type, []).append(c)
+    selected = []
+    for t in order:
+        selected.extend(by_type.get(t, []))
+        if len(selected) >= top_k:
+            break
+    return [
+        {"text": c.text, "page_start": c.page_start, "page_end": c.page_end,
+         "section": getattr(c, "section_heading", ""), "content_type": getattr(c, "content_type", "procedure"),
+         "source_file": c.source_file, "chunk_id": c.chunk_id,
+         "manual_id": getattr(c, "manual_id", ""), "manual_version": getattr(c, "manual_version", "")}
+        for c in selected[:top_k]
+    ]
 
 
 def _to_chunk_dicts(embedded: list[dict]) -> list[dict]:

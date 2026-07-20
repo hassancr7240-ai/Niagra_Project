@@ -764,6 +764,74 @@ def generate_xlsx(doc: PMDocument, output_path: Path) -> Path:
     return output_path
 
 
+def _sanitize_con_l3_name(name: str) -> str:
+    """Convert a machine name to uppercase CON L3 display format."""
+    for src, dst in [('ä', 'a'), ('ö', 'o'), ('ü', 'u'), ('Ä', 'A'), ('Ö', 'O'),
+                     ('Ü', 'U'), ('ß', 'ss'), ('.', ''), ('_', ' ')]:
+        name = name.replace(src, dst)
+    import re
+    name = re.sub(r'[^\w\s\-]', '', name)
+    return ' '.join(name.upper().split())
+
+
+# Map machine_id → (con_l3_display_name, zip_stem)
+_MACHINE_CON_L3: dict[str, tuple[str, str]] = {
+    'DEHUMIDIFIER-L3':   ('EISBAR DAS-E8K2 DEHUMIDIFIER', 'Dehumidifier_EISBAR'),
+    'CONTIFORM-C3-L3':   ('KRONES CONTIFORM C3 SAN',      'Krones_Contiform_C3_SAN'),
+    'VARIOPAC-PRO-L3':   ('KRONES VARIOPAC PRO FS',        'Variopac_Pro_KRONES'),
+    'SHRINK-TUNNEL-L3':  ('KRONES SHRINK TUNNEL',          'Shrink_Tunnel_KRONES'),
+    'BOTTLECODER-L3':    ('BOTTLE CODER',                  'CON_L3_Bottle_Coder'),
+    'TETRAPAK-ASEPTIC-L3': ('TETRA PAK ASEPTIC TANK',     'Tetra_Pak_Aseptic_Tank'),
+}
+
+
+def generate_con_l3_zip_bytes(machine_id: str, machine_display_name: str, tasks: list) -> tuple[bytes, str]:
+    """
+    Generate a ZIP in memory with one XLSX per PM interval.
+    Returns (zip_bytes, zip_filename).
+    """
+    import io, zipfile
+    from collections import defaultdict
+
+    con_l3_name, zip_stem = _MACHINE_CON_L3.get(machine_id, (None, None))
+    if not con_l3_name:
+        con_l3_name = _sanitize_con_l3_name(machine_display_name)
+    if not zip_stem:
+        zip_stem = con_l3_name.title().replace(' ', '_')
+
+    safe_prefix = con_l3_name.replace(' ', '_').replace('-', '_')
+
+    by_interval: dict[int, list] = defaultdict(list)
+    for task in sorted(tasks,
+                       key=lambda x: getattr(x, 'task_no', 0) if not isinstance(x, dict)
+                                     else x.get('task_no', 0)):
+        iv = (int(getattr(task, 'interval_hours', 0) or 0)
+              if not isinstance(task, dict)
+              else int(task.get('interval_hours', 0) or 0))
+        by_interval[iv].append(task)
+
+    # If all tasks landed in interval 0 (no interval data) use a single sheet
+    if not by_interval or list(by_interval.keys()) == [0]:
+        by_interval = {0: tasks}
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for interval in sorted(by_interval.keys()):
+            label = _xlsx_interval_label(interval)
+            file_label = _xlsx_file_label(interval)
+            xlsx_name = f"PM_{safe_prefix}_{file_label}.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = label.upper()[:31]
+            _write_xlsx_sheet(ws, con_l3_name, label, by_interval[interval],
+                              interval_hours=interval)
+            wb_bytes_buf = io.BytesIO()
+            wb.save(wb_bytes_buf)
+            zf.writestr(xlsx_name, wb_bytes_buf.getvalue())
+
+    return zip_buf.getvalue(), f"{zip_stem}.zip"
+
+
 def generate_xlsx_all_intervals(doc: PMDocument, output_dir: Path) -> list[tuple[Path, str, int]]:
     """
     Generate one XLSX file per PM interval in output_dir.

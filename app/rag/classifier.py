@@ -36,18 +36,21 @@ _MAINTENANCE_KEYWORDS = [
 async def classify_manual(pdf_path: Path, sample_text: str) -> ClassificationResult:
     """
     Two-stage classification:
-    1. Fast keyword scan (no API call)
-    2. AI fallback (watsonx granite-13b-instruct-v2 or OpenAI) if confidence is low
+    1. Fast keyword scan (no API call) — sufficient for 95% of manuals
+    2. AI fallback only when keyword confidence is very low (< 0.3)
     """
     result = _keyword_classify(sample_text)
-    if result.confidence >= 0.8:
+    # Skip slow AI call unless keyword scanner found nothing at all
+    if result.confidence >= 0.3:
         return result
 
     try:
+        import asyncio as _asyncio
         if settings.ai_provider == "watsonx" and settings.watsonx_api_key:
-            ai_result = await _ai_classify_watsonx(sample_text)
+            ai_coro = _ai_classify_watsonx(sample_text)
         else:
-            ai_result = await _ai_classify_ollama(sample_text)
+            ai_coro = _ai_classify_ollama(sample_text)
+        ai_result = await _asyncio.wait_for(ai_coro, timeout=25)
         if ai_result.confidence > result.confidence:
             return ai_result
     except Exception:
@@ -85,16 +88,38 @@ def _keyword_classify(text: str) -> ClassificationResult:
             detected_chapters=[9],
         )
 
-    # Try to detect chapter with maintenance content
+    # Boost confidence if maintenance keywords are present — skip AI
+    maintenance_hits = sum(1 for kw in _MAINTENANCE_KEYWORDS if kw in text_lower)
+    confidence = min(0.7, 0.3 + maintenance_hits * 0.08)
+
+    # Try to detect manufacturer from title/header lines
+    manufacturer = _detect_manufacturer_from_text(text_lower)
+
     chapters = _detect_maintenance_chapters(text_lower)
     return ClassificationResult(
-        manufacturer="THIRD_PARTY",
+        manufacturer=manufacturer,
         model=None,
         machine_type="THIRD_PARTY",
-        confidence=0.5,
+        confidence=confidence,
         method="keyword",
         detected_chapters=chapters,
     )
+
+
+def _detect_manufacturer_from_text(text_lower: str) -> str:
+    """Extract manufacturer name from the first 1000 chars (title/header area)."""
+    header = text_lower[:1000]
+    known = [
+        ("tetra pak", "TETRA PAK"), ("tetra", "TETRA PAK"),
+        ("sidel", "SIDEL"), ("khs", "KHS"), ("sig", "SIG"),
+        ("bosch", "BOSCH"), ("abb", "ABB"), ("siemens", "SIEMENS"),
+        ("festo", "FESTO"), ("sew", "SEW"), ("schneider", "SCHNEIDER"),
+        ("niagara", "NIAGARA"), ("pmrspl", "TETRA PAK"),
+    ]
+    for kw, name in known:
+        if kw in header:
+            return name
+    return "THIRD_PARTY"
 
 
 def _detect_krones_model(text_lower: str) -> Optional[str]:

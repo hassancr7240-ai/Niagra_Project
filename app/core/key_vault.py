@@ -35,6 +35,7 @@ async def load_secrets_from_key_vault() -> bool:
             "pm-openai-api-key":                    "OPENAI_API_KEY",
             "pm-watsonx-api-key":                   "WATSONX_API_KEY",
             "pm-azure-search-api-key":              "AZURE_SEARCH_API_KEY",
+            "pm-azure-doc-intelligence-key":        "AZURE_DOC_INTELLIGENCE_KEY",
             "pm-app-secret-key":                    "APP_SECRET_KEY",
             "pm-ftp-key-path":                      "FTP_KEY_PATH",
         }

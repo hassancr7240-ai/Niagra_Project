@@ -88,6 +88,33 @@ async def upload_manual(
     tmp_path = Path(tmp_dir) / safe_name
     tmp_path.write_bytes(content)
 
+    # Archive PDF permanently to Azure Blob Storage (keyed by manual_id prefix)
+    blob_url: Optional[str] = None
+    try:
+        from app.config import get_settings as _gs
+        _s = _gs()
+        if _s.azure_storage_connection_string or _s.azure_storage_account_name:
+            from azure.storage.blob import BlobServiceClient
+            from azure.identity import DefaultAzureCredential as _DAC
+            _conn = _s.azure_storage_connection_string
+            if _conn:
+                _bsc = BlobServiceClient.from_connection_string(_conn)
+            else:
+                _bsc = BlobServiceClient(
+                    account_url=f"https://{_s.azure_storage_account_name}.blob.core.windows.net",
+                    credential=_DAC(),
+                )
+            # Blob path: manuals/<manual_id>/<original_filename>
+            # manual_id not yet known — use placeholder, updated after DB insert
+            _blob_name_tmp = f"manuals/pending/{safe_name}"
+            _cc = _bsc.get_container_client(_s.azure_storage_container_name)
+            with open(tmp_path, "rb") as _f:
+                _cc.upload_blob(name=_blob_name_tmp, data=_f, overwrite=True)
+            blob_url = f"https://{_s.azure_storage_account_name or _bsc.account_name}.blob.core.windows.net/{_s.azure_storage_container_name}/{_blob_name_tmp}"
+    except Exception as _be:
+        import logging as _log
+        _log.getLogger(__name__).warning("PDF Blob archive failed (non-fatal): %s", _be)
+
     # Create DB record
     upload_record = await crud.create_manual_upload(
         db,
@@ -95,11 +122,23 @@ async def upload_manual(
             "original_filename": safe_name,
             "machine_id": machine_id,
             "local_path": str(tmp_path),
+            "blob_url": blob_url,
             "file_size_bytes": len(content),
             "status": "UPLOADED",
             "uploaded_by": user.email,
         },
     )
+
+    # Re-key the blob under the real manual_id now that we have it
+    if blob_url and upload_record.manual_id:
+        try:
+            _final_blob = f"manuals/{upload_record.manual_id}/{safe_name}"
+            _cc.copy_blob(_cc.get_blob_client(_final_blob), blob_url)
+            _cc.delete_blob(f"manuals/pending/{safe_name}")
+            blob_url = blob_url.replace(f"manuals/pending/{safe_name}", _final_blob)
+            await crud.update_manual_upload(db, upload_record.manual_id, {"blob_url": blob_url})
+        except Exception:
+            pass
 
     await log_action(
         db,
@@ -319,6 +358,101 @@ async def approve_extracted_tasks(
     }
 
 
+@router.post("/uploads/{manual_id}/reject", response_model=dict)
+async def reject_extracted_tasks(
+    manual_id: str,
+    user: CurrentUserDep,
+    db: DBDep,
+    comment: str = Form(...),
+    interval_hours: int = Form(0),
+) -> dict:
+    """
+    Engineer rejects extracted tasks with a mandatory comment.
+    Saves rejection to Azure SQL Approvals table.
+    """
+    user.require("manual:approve")
+
+    if not comment or not comment.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rejection comment is required",
+        )
+
+    upload = await crud.get_manual_upload(db, manual_id)
+    if not upload:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    if upload.status not in ("PENDING_REVIEW", "APPROVED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Upload cannot be rejected (status: {upload.status})",
+        )
+
+    approval = await crud.save_manual_approval(
+        db,
+        {
+            "manual_id": manual_id,
+            "interval_hours": interval_hours,
+            "status": "REJECTED",
+            "comment": comment.strip(),
+            "reviewed_by": user.email,
+        },
+    )
+
+    await log_action(
+        db,
+        action="MANUAL_REJECTED",
+        user_id=user.user_id,
+        user_email=user.email,
+        resource_type="manual_upload",
+        resource_id=manual_id,
+        details={"interval_hours": interval_hours, "comment": comment.strip()},
+        ip_address=user.ip_address,
+    )
+
+    return {
+        "manual_id": manual_id,
+        "approval_id": approval.approval_id,
+        "status": "REJECTED",
+        "comment": comment.strip(),
+        "reviewed_by": user.email,
+    }
+
+
+@router.get("/uploads/{manual_id}/citations", response_model=list[dict])
+async def get_citations(
+    manual_id: str,
+    user: CurrentUserDep,
+    db: DBDep,
+    content_type: Optional[str] = None,
+) -> list[dict]:
+    """
+    GET /api/manual/uploads/{manual_id}/citations
+    Returns all citation records for a manual — enables clickable page links in the review UI.
+    Optionally filter by content_type (warning, loto, ppe, procedure, etc.)
+    """
+    user.require("manual:upload")
+
+    if content_type:
+        citations = await crud.get_citations_by_content_type(db, manual_id, content_type)
+    else:
+        citations = await crud.get_citations_for_manual(db, manual_id)
+
+    return [
+        {
+            "citation_id": c.citation_id,
+            "manual_id": c.manual_id,
+            "chunk_id": c.chunk_id,
+            "page_start": c.page_start,
+            "page_end": c.page_end,
+            "section": c.section,
+            "content_type": c.content_type,
+            "text_excerpt": c.text_excerpt,
+            "manual_version": c.manual_version,
+        }
+        for c in citations
+    ]
+
+
 @router.get("/uploads/{manual_id}/generate-zip")
 async def generate_zip_download(
     manual_id: str,
@@ -510,6 +644,8 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             pdf_path.name,
             settings.rag_max_section_words,
             settings.rag_min_section_words,
+            manual_id,
+            "",
         )
     )
     text_task = asyncio.ensure_future(
@@ -543,15 +679,23 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] Smart chunking: %d chunks (%s)", manual_id, len(chunks), type_summary)
 
     update_fn("EMBEDDING")
+    from app.rag.pipeline import (
+        _retrieve_8_pass_local, _select_top_chunks_by_type,
+        _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
+    )
+
+    chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
+    interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
+
     if settings.ai_provider != "watsonx":
-        # Local dev fast path: skip embedding — select chunks directly by structure type
-        from app.rag.pipeline import _select_top_chunks_by_type
-        top_chunks = _select_top_chunks_by_type(chunks, settings.rag_top_k)
+        # Local dev fast path: 8-pass content_type filtering — no embedding needed
+        top_chunks = _retrieve_8_pass_local(chunks, interval_hints)
+        if not top_chunks:
+            top_chunks = _select_top_chunks_by_type(chunks, settings.rag_top_k)
         embedded = []
-        log.info("[%s] Local dev: skipping embedding — selected %d chunks by type",
-                 manual_id, len(top_chunks))
+        log.info("[%s] Local dev 8-pass: selected %d chunks", manual_id, len(top_chunks))
     else:
-        # Production watsonx: full embed + index + semantic retrieval
+        # Production: full embed + index + Azure AI Search hybrid retrieval
         priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
         others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
         embed_subset = (priority + others)[:200]
@@ -570,10 +714,6 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                            "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
                           for e in embedded[:10]]
 
-    from app.rag.pipeline import _guess_intervals
-    # Merge manufacturer defaults with intervals detected from document structure
-    chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
-    interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
     extracted_tasks = await extract_tasks_from_chunks(
         top_chunks,
         manufacturer=classification.manufacturer,
@@ -581,14 +721,53 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         interval_hints=interval_hints,
     )
 
-    # Fallback: if AI returned 0 tasks, try direct table extraction from the
-    # PDF (handles PMRSPL-style tabular manuals like Tetra Pak)
     if not extracted_tasks:
         log.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
-        from app.rag.pipeline import _extract_tasks_from_pdf_tables
         extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+
+    # Save citations then run internal validation
+    citation_records = [
+        {
+            "manual_id": manual_id,
+            "chunk_id": c.get("chunk_id", ""),
+            "page_start": c.get("page_start", 0),
+            "page_end": c.get("page_end", 0),
+            "section": c.get("section", ""),
+            "content_type": c.get("content_type", "procedure"),
+            "text_excerpt": c.get("text", "")[:500],
+            "manual_version": c.get("manual_version", ""),
+        }
+        for c in top_chunks
+        if c.get("page_start", 0) > 0
+    ]
+    if citation_records:
+        import sqlite3 as _sqlite3
+        import json as _json
+        try:
+            conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
+            conn.executemany(
+                "INSERT OR IGNORE INTO citations "
+                "(citation_id, manual_id, chunk_id, page_start, page_end, section, content_type, text_excerpt, manual_version) "
+                "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?)",
+                [
+                    (r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
+                     r["section"], r["content_type"], r["text_excerpt"], r["manual_version"])
+                    for r in citation_records
+                ],
+            )
+            conn.close()
+            log.info("[%s] Saved %d citations (raw sqlite)", manual_id, len(citation_records))
+        except Exception as ce:
+            log.warning("[%s] Citation save failed: %s", manual_id, ce)
+
+    extracted_tasks = _validate_task_citations(extracted_tasks, citation_records)
+    unverified = sum(1 for t in extracted_tasks if t.get("validation_status") == "UNVERIFIED")
+    if unverified:
+        log.warning("[%s] Validation: %d/%d tasks UNVERIFIED", manual_id, unverified, len(extracted_tasks))
+    else:
+        log.info("[%s] Validation passed: all %d tasks have citations", manual_id, len(extracted_tasks))
 
     log.info("[%s] Extracted %d tasks — writing to DB", manual_id, len(extracted_tasks))
 

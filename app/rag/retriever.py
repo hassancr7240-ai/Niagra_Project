@@ -147,14 +147,18 @@ async def index_chunks(chunks_with_embeddings: list[dict], manual_id: str) -> in
             index_name=settings.azure_search_index_name,
             credential=AzureKeyCredential(settings.azure_search_api_key or ""),
         )
+        # Full JSON metadata per chunk — content_type + section enable 8-pass hybrid filtering
         documents = [
             {
                 "id": c["chunk_id"].replace("/", "_").replace(".", "_"),
                 "manual_id": manual_id,
                 "text": c["text"],
-                "page_start": c["page_start"],
-                "page_end": c["page_end"],
-                "source_file": c["source_file"],
+                "page_start": c.get("page_start", 0),
+                "page_end": c.get("page_end", 0),
+                "source_file": c.get("source_file", ""),
+                "content_type": c.get("content_type", "procedure"),
+                "section": c.get("section_heading", "") or c.get("section", ""),
+                "manual_version": c.get("manual_version", ""),
                 "content_vector": c["embedding"],
             }
             for c in chunks_with_embeddings
@@ -176,10 +180,14 @@ async def retrieve_top_k(
     query_embedding: list[float],
     manual_id: Optional[str] = None,
     top_k: int = 10,
+    content_type_filter: Optional[str] = None,
+    keyword_query: Optional[str] = None,
 ) -> list[dict]:
     """
-    Find the top-k most semantically similar chunks to the query.
-    Uses Azure AI Search when configured, falls back to local SQLite cosine search.
+    Hybrid BM25 keyword + semantic vector search — not cosine-only.
+    Uses Azure AI Search when configured, falls back to local SQLite cosine.
+    content_type_filter: narrows results to a specific content type (e.g. "loto", "ppe")
+    keyword_query: BM25 search text — combined with vector for hybrid retrieval
     """
     if not settings.azure_search_endpoint:
         import asyncio
@@ -201,26 +209,37 @@ async def retrieve_top_k(
             k_nearest_neighbors=top_k,
             fields="content_vector",
         )
-        filter_str = f"manual_id eq '{manual_id}'" if manual_id else None
+
+        # Build OData filter: manual_id + optional content_type
+        filters = []
+        if manual_id:
+            filters.append(f"manual_id eq '{manual_id}'")
+        if content_type_filter:
+            filters.append(f"content_type eq '{content_type_filter}'")
+        filter_str = " and ".join(filters) if filters else None
+
         async with client:
             results = await client.search(
-                search_text=None,
+                # Hybrid: search_text drives BM25 keyword, vector_queries drives semantic
+                search_text=keyword_query or "*",
                 vector_queries=[vector_query],
                 filter=filter_str,
-                select=["text", "page_start", "page_end", "source_file", "manual_id"],
+                select=["text", "page_start", "page_end", "source_file",
+                        "manual_id", "content_type", "section", "manual_version"],
                 top=top_k,
             )
             chunks = []
             async for r in results:
-                chunks.append(
-                    {
-                        "text": r.get("text", ""),
-                        "page_start": r.get("page_start", 0),
-                        "page_end": r.get("page_end", 0),
-                        "source_file": r.get("source_file", ""),
-                        "score": r.get("@search.score", 0.0),
-                    }
-                )
+                chunks.append({
+                    "text": r.get("text", ""),
+                    "page_start": r.get("page_start", 0),
+                    "page_end": r.get("page_end", 0),
+                    "source_file": r.get("source_file", ""),
+                    "content_type": r.get("content_type", "procedure"),
+                    "section": r.get("section", ""),
+                    "manual_version": r.get("manual_version", ""),
+                    "score": r.get("@search.score", 0.0),
+                })
         return chunks
 
     except Exception as exc:

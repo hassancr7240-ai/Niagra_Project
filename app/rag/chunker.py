@@ -371,6 +371,123 @@ def _extract_checkbox_chunks(section_chunks: list[TextChunk]) -> list[TextChunk]
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+def _parse_with_doc_intelligence(
+    pdf_path: Path,
+    source_file: str,
+    manual_id: str,
+    manual_version: str,
+) -> list[TextChunk]:
+    """
+    Azure Document Intelligence parser (prebuilt-layout model).
+    Returns TextChunks with accurate page_start/page_end, section headings, and table structure.
+    Falls back to pdfplumber if ADI is not configured or call fails.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+
+    if not settings.azure_doc_intelligence_endpoint or not settings.azure_doc_intelligence_key:
+        return []  # Not configured — caller falls back to pdfplumber
+
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
+
+        client = DocumentIntelligenceClient(
+            endpoint=settings.azure_doc_intelligence_endpoint,
+            credential=AzureKeyCredential(settings.azure_doc_intelligence_key),
+        )
+
+        with open(pdf_path, "rb") as f:
+            poller = client.begin_analyze_document(
+                model_id=settings.azure_doc_intelligence_model,
+                body=f,
+                content_type="application/octet-stream",
+            )
+        result = poller.result()
+
+        chunks: list[TextChunk] = []
+        chunk_counter = 0
+
+        # Extract paragraphs with page numbers
+        current_heading = ""
+        for para in (result.paragraphs or []):
+            text = para.content or ""
+            if not text.strip():
+                continue
+
+            page_start = page_end = 0
+            if para.bounding_regions:
+                page_start = para.bounding_regions[0].page_number
+                page_end = para.bounding_regions[-1].page_number
+
+            role = getattr(para, "role", None) or ""
+            is_heading = role in ("title", "sectionHeading", "heading")
+            if is_heading:
+                current_heading = text.strip()
+
+            ct = _detect_content_type(text, current_heading, "section")
+            chunk_id = f"{source_file}::adi::{chunk_counter}"
+            chunks.append(TextChunk(
+                chunk_id=chunk_id,
+                text=text,
+                page_start=page_start,
+                page_end=page_end,
+                char_start=0,
+                char_end=len(text),
+                source_file=source_file,
+                chunk_type="section" if not is_heading else "text",
+                section_heading=current_heading,
+                interval_hint=_detect_interval(text),
+                content_type=ct,
+                manual_id=manual_id,
+                manual_version=manual_version,
+            ))
+            chunk_counter += 1
+
+        # Extract tables with page numbers
+        for table in (result.tables or []):
+            page_start = page_end = 0
+            if table.bounding_regions:
+                page_start = table.bounding_regions[0].page_number
+                page_end = table.bounding_regions[-1].page_number
+
+            # Build row text from cells
+            rows: dict[int, list[str]] = {}
+            for cell in (table.cells or []):
+                rows.setdefault(cell.row_index, []).append(cell.content or "")
+
+            for row_idx, cells in sorted(rows.items()):
+                row_text = " | ".join(c.strip() for c in cells if c.strip())
+                if not row_text or len(row_text) < 5:
+                    continue
+                chunk_id = f"{source_file}::adi::tbl::{chunk_counter}"
+                chunks.append(TextChunk(
+                    chunk_id=chunk_id,
+                    text=row_text,
+                    page_start=page_start,
+                    page_end=page_end,
+                    char_start=0,
+                    char_end=len(row_text),
+                    source_file=source_file,
+                    chunk_type="table_row",
+                    section_heading=current_heading,
+                    interval_hint=_detect_interval(row_text),
+                    content_type="table",
+                    manual_id=manual_id,
+                    manual_version=manual_version,
+                ))
+                chunk_counter += 1
+
+        return chunks
+
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Azure Document Intelligence failed (%s) — falling back to pdfplumber", exc
+        )
+        return []
+
+
 def smart_chunk_pdf(
     pdf_path: Path,
     source_file: str,
@@ -382,15 +499,17 @@ def smart_chunk_pdf(
     """
     Structure-aware PDF chunking — preferred entry point.
 
-    Priority order:
-      1. Table rows      — direct row extraction, highest precision
-      2. Section chunks  — split on headings, not arbitrary word count
-      3. Checkbox items  — task-indicator symbols get individual chunks
-      4. Sliding window  — last-resort fallback only
-
-    Each chunk carries section_heading, interval_hint, content_type, manual_id,
-    and manual_version so the 8-pass retrieval and citation tracking work correctly.
+    Parser priority:
+      1. Azure Document Intelligence — accurate page numbers, tables, headings (production)
+      2. pdfplumber structure-aware  — table rows → section → checkbox (local dev)
+      3. Sliding window              — last-resort fallback only
     """
+    # Try Azure Document Intelligence first (production path)
+    adi_chunks = _parse_with_doc_intelligence(pdf_path, source_file, manual_id, manual_version)
+    if adi_chunks:
+        return adi_chunks
+
+    # pdfplumber path (local dev / ADI not configured)
     with pdfplumber.open(str(pdf_path)) as pdf:
         table_chunks = _extract_table_chunks(pdf, source_file, manual_id, manual_version)
         section_chunks = _extract_section_chunks(

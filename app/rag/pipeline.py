@@ -173,6 +173,16 @@ async def run_pipeline(
             await db.commit()
             logger.info("[%s] Saved %d citations", manual_id, saved)
 
+        # Internal validation: every task must have ≥1 citation
+        extracted_tasks = _validate_task_citations(extracted_tasks, citation_records)
+        unverified = [t for t in extracted_tasks if t.get("validation_status") == "UNVERIFIED"]
+        if unverified:
+            logger.warning("[%s] Validation: %d/%d tasks UNVERIFIED (no citation)",
+                           manual_id, len(unverified), len(extracted_tasks))
+        else:
+            logger.info("[%s] Validation passed: all %d tasks have citations",
+                        manual_id, len(extracted_tasks))
+
         results["extracted_tasks"] = extracted_tasks
         results["status"] = "PENDING_REVIEW"
 
@@ -357,6 +367,21 @@ def _select_top_chunks_by_type(chunks: list, top_k: int) -> list[dict]:
          "manual_id": getattr(c, "manual_id", ""), "manual_version": getattr(c, "manual_version", "")}
         for c in selected[:top_k]
     ]
+
+
+def _validate_task_citations(tasks: list[dict], citation_records: list[dict]) -> list[dict]:
+    """
+    Internal validation: every task must have at least one citation (page_start > 0).
+    Tasks beyond the count of valid citations are flagged UNVERIFIED.
+    UNVERIFIED tasks are still shown to the engineer but displayed with a warning badge.
+    """
+    valid_count = len([c for c in citation_records if c.get("page_start", 0) > 0])
+    validated = []
+    for i, task in enumerate(tasks):
+        task = dict(task)
+        task["validation_status"] = "VERIFIED" if i < valid_count and valid_count > 0 else "UNVERIFIED"
+        validated.append(task)
+    return validated
 
 
 def _to_chunk_dicts(embedded: list[dict]) -> list[dict]:

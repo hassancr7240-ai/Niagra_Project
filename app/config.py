@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr-v2"
     watsonx_embedding_dims: int = 1024
 
+    # ── Azure Document Intelligence ───────────────────────────────────────────
+    azure_doc_intelligence_endpoint: Optional[str] = None
+    azure_doc_intelligence_key: Optional[str] = None
+    azure_doc_intelligence_model: str = "prebuilt-layout"
+
     # ── Azure AI Search ───────────────────────────────────────────────────────
     azure_search_endpoint: Optional[str] = None
     azure_search_api_key: Optional[str] = None

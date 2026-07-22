@@ -233,6 +233,44 @@ async function loadDashboard() {
   } catch (e) {
     console.error('Dashboard load error:', e);
   }
+
+  // Load pending-review manuals separately — show as a CTA banner on dashboard
+  loadPendingReviews();
+}
+
+async function loadPendingReviews() {
+  try {
+    const uploads = await api('/api/manual/uploads');
+    if (!uploads) return;
+    const pending = uploads.filter(u => u.status === 'PENDING_REVIEW');
+    const card = document.getElementById('pendingReviewsCard');
+    const list = document.getElementById('pendingReviewsList');
+    const badge = document.getElementById('pendingReviewBadge');
+    if (!card || !list) return;
+    if (pending.length === 0) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    badge.textContent = pending.length;
+    list.innerHTML = pending.map(u => `
+      <div style="padding:12px 0;border-bottom:1px solid var(--grey-200)">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:700;color:var(--navy)">${u.detected_manufacturer || 'Unknown'}</div>
+            <div style="font-size:11px;color:var(--grey-500);margin-top:1px">${u.filename || '—'} · ${u.task_count} task${u.task_count!==1?'s':''} · ${u.uploaded_by || '?'} · ${new Date(u.created_at).toLocaleDateString()}</div>
+          </div>
+          <a href="/frontend/review.html?id=${u.manual_id}"
+             style="padding:7px 16px;background:#1B3A6B;color:#fff;border-radius:6px;text-decoration:none;font-size:12px;font-weight:700;white-space:nowrap;flex-shrink:0">
+            📋 Review →
+          </a>
+        </div>
+        ${u.task_count > 0
+          ? `<div style="font-size:10.5px;font-weight:600;color:#64748B;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">PM Intervals awaiting approval</div>
+             <div style="display:flex;flex-wrap:wrap;gap:6px">
+               <a href="/frontend/review.html?id=${u.manual_id}" style="display:inline-flex;align-items:center;padding:4px 12px;background:#EFF6FF;border:1.5px solid #BFDBFE;border-radius:6px;font-size:11.5px;font-weight:700;color:#1B3A6B;text-decoration:none">All ${u.task_count} tasks →</a>
+             </div>`
+          : `<div style="font-size:11px;color:#F59E0B;background:#FFFBEB;border:1px solid #FDE68A;border-radius:5px;padding:5px 10px">⚠ 0 tasks extracted — AI could not parse this PDF</div>`
+        }
+      </div>`).join('');
+  } catch(e) {}
 }
 
 // ─── Machines for Selects ─────────────────────────────────────────────────────
@@ -785,63 +823,99 @@ function _updatePipelineUI(data) {
     detailsEl.innerHTML = info.join(' &nbsp;|&nbsp; ');
   }
 
-  // Show review card when PENDING_REVIEW
-  if (data.status === 'PENDING_REVIEW' && reviewCard) {
+  // When pipeline completes — show interval buttons for the review flow
+  if ((data.status === 'PENDING_REVIEW' || data.status === 'APPROVED') && reviewCard) {
+    const tasks      = data.extracted_tasks || [];
+    const taskCount  = tasks.length || data.extracted_task_count || 0;
+    const mfr        = data.detected_manufacturer || 'Unknown';
+    const isApproved = data.status === 'APPROVED';
     reviewCard.style.display = 'block';
-    document.getElementById('reviewTaskCount').textContent = `${data.extracted_task_count || 0} tasks`;
 
-    // Populate machine dropdown for review
-    const sel = document.getElementById('review-machine-select');
-    if (sel && sel.options.length === 1) {
-      const genSel = document.getElementById('gen-machine');
-      if (genSel) Array.from(genSel.options).slice(1).forEach(o => sel.appendChild(o.cloneNode(true)));
-    }
-    if (data.machine_id && sel) {
-      sel.value = data.machine_id;
-    } else if (sel && data.detected_manufacturer) {
-      // Auto-select the best matching machine based on detected manufacturer
-      const mfr = (data.detected_manufacturer || '').toLowerCase();
-      const model = (data.detected_model || '').toLowerCase();
-      let bestOption = null;
-      for (const opt of sel.options) {
-        if (!opt.value) continue;
-        const label = opt.text.toLowerCase();
-        if (mfr.includes('eisbar') || mfr.includes('eisbär')) {
-          if (label.includes('eisb') || label.includes('dehumidifier')) { bestOption = opt; break; }
-        } else if (mfr.includes('krones')) {
-          if (model.includes('contiform') && label.includes('contiform')) { bestOption = opt; break; }
-          if (model.includes('variopac') && label.includes('variopac')) { bestOption = opt; break; }
-          if (model.includes('shrink') && label.includes('shrink')) { bestOption = opt; break; }
-          if (!bestOption && label.includes('krones')) bestOption = opt;
-        } else if (mfr.includes('tetra')) {
-          if (label.includes('tetra') || label.includes('aseptic')) { bestOption = opt; break; }
-        }
-      }
-      if (bestOption) sel.value = bestOption.value;
+    if (taskCount === 0) {
+      // Zero tasks — show helpful error state, not a broken ZIP button
+      reviewCard.innerHTML = `
+        <div class="card-header">
+          <h3 class="card-title" style="color:var(--amber)">⚠️ Step 3 — No Tasks Extracted</h3>
+          <span class="badge badge-amber">0 tasks</span>
+        </div>
+        <div style="background:#FFFBEB;border:1.5px solid #FDE68A;border-radius:8px;padding:14px 16px;margin-bottom:12px">
+          <div style="font-size:12.5px;font-weight:700;color:#92400E;margin-bottom:5px">
+            AI extraction returned 0 tasks for <strong>${mfr}</strong>
+          </div>
+          <div style="font-size:11.5px;color:#78350F;line-height:1.6">
+            This can happen when the PDF is image-based (not selectable text), when the maintenance schedule is embedded in diagrams, or when the table format is not recognised.<br/>
+            <strong>Try:</strong> uploading a text-searchable PDF, or a different chapter/section of the manual.
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" style="flex:1;font-size:12px"
+            onclick="document.getElementById('pdfFile').click()">↑ Upload Different PDF</button>
+        </div>`;
+      return;
     }
 
-    // Show extracted tasks preview
-    const tasksEl = document.getElementById('reviewTasksList');
-    if (tasksEl && data.extracted_tasks?.length) {
-      tasksEl.innerHTML = `<table style="width:100%;font-size:12px">
-        <thead><tr><th style="padding:4px 8px;background:var(--grey-200)">#</th><th style="padding:4px 8px;background:var(--grey-200)">Area</th><th style="padding:4px 8px;background:var(--grey-200)">Action</th><th style="padding:4px 8px;background:var(--grey-200)">Description (first 80 chars)</th><th style="padding:4px 8px;background:var(--grey-200)">Hrs</th></tr></thead>
-        <tbody>${data.extracted_tasks.slice(0,20).map(t => `
-          <tr style="border-bottom:1px solid var(--grey-200)">
-            <td style="padding:3px 8px">${t.task_no || '—'}</td>
-            <td style="padding:3px 8px">${t.area || '—'}</td>
-            <td style="padding:3px 8px">${t.action || '—'}</td>
-            <td style="padding:3px 8px;font-size:11px">${(t.description || '').substring(0,80)}${(t.description||'').length>80?'…':''}</td>
-            <td style="padding:3px 8px">${t.interval_hours || '—'}</td>
-          </tr>`).join('')}
-        </tbody></table>
-        ${data.extracted_tasks.length > 20 ? `<p style="font-size:11px;color:var(--grey-500);text-align:center;margin:8px 0">... and ${data.extracted_tasks.length - 20} more tasks</p>` : ''}`;
-    } else if (tasksEl) {
-      tasksEl.innerHTML = '<div class="empty-state" style="padding:20px"><p>Tasks will appear here after extraction</p></div>';
-    }
+    // Build interval list from extracted_tasks (or fall back if tasks array not in poll data)
+    const ivLabel = h => {
+      const m = {8:'8hr / Daily',120:'2-Week',240:'Monthly Prep',500:'500hr / Monthly',
+        1000:'1000hr',1500:'1500hr / Qtrly',2000:'2000hr',3000:'3000hr / 6-Month',
+        4000:'4000hr',6000:'6000hr / Annual',42000:'42000hr / 7yr'};
+      return m[h] || `${h}hr`;
+    };
+
+    const intervals = [...new Set(tasks.map(t => t.interval_hours).filter(Boolean))].sort((a,b)=>a-b);
+    const intervalBtns = intervals.length
+      ? intervals.map(h => {
+          const cnt = tasks.filter(t => t.interval_hours === h).length;
+          return `<a href="/frontend/review.html?id=${data.manual_id}&interval=${h}"
+            style="display:flex;flex-direction:column;align-items:center;gap:4px;
+                   flex:1;min-width:80px;padding:12px 8px;
+                   background:#fff;border:2px solid #CBD5E1;border-radius:8px;
+                   text-decoration:none;transition:all .15s;cursor:pointer"
+            onmouseover="this.style.borderColor='#1B3A6B';this.style.background='#EFF6FF'"
+            onmouseout="this.style.borderColor='#CBD5E1';this.style.background='#fff'">
+              <span style="font-size:13px;font-weight:800;color:#1B3A6B">${ivLabel(h)}</span>
+              <span style="font-size:10px;font-weight:600;color:#64748B">${cnt} task${cnt!==1?'s':''}</span>
+            </a>`;
+        }).join('')
+      : `<div style="font-size:11.5px;color:#64748B;padding:12px">Interval data not available — open full review page.</div>`;
+
+    reviewCard.innerHTML = `
+      <div class="card-header">
+        <h3 class="card-title" style="color:${isApproved ? 'var(--green)' : 'var(--navy)'}">
+          ${isApproved ? '✅ Step 3 — Approved' : '✅ Step 3 — Review &amp; Approve'}
+        </h3>
+        <span class="badge ${isApproved ? 'badge-green' : 'badge-blue'}">${taskCount} tasks</span>
+      </div>
+
+      <div style="font-size:11.5px;color:#475569;margin-bottom:10px">
+        <strong>${mfr}</strong> — ${taskCount} tasks across <strong>${intervals.length} PM interval${intervals.length!==1?'s':''}</strong>
+        ${isApproved ? ` · Approved by <strong>${data.approved_by || 'engineer'}</strong>` : ' · Select an interval to review and approve:'}
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+        ${intervalBtns}
+      </div>
+
+      <a href="/frontend/review.html?id=${data.manual_id}"
+         style="display:flex;align-items:center;justify-content:center;gap:8px;
+                width:100%;padding:11px;background:#1B3A6B;color:#fff;border-radius:8px;
+                text-decoration:none;font-size:13px;font-weight:700;letter-spacing:.1px;
+                box-shadow:0 2px 8px rgba(27,58,107,.2);transition:background .15s;margin-bottom:8px"
+         onmouseover="this.style.background='#0F2549'" onmouseout="this.style.background='#1B3A6B'">
+        📋 Open Full Review — All ${taskCount} Tasks →
+      </a>
+
+      ${isApproved ? `
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" style="flex:1;font-size:12px"
+          onclick="generateZip()">⬇ Download ZIP</button>
+        <button class="btn btn-outline" style="flex:1;font-size:12px"
+          onclick="generateZip()">📊 Download Excel</button>
+      </div>` : ''}
+      <div id="zipAlert" style="margin-top:8px"></div>`;
   }
 
   if (data.status === 'APPROVED' && generateCard) {
-    reviewCard.style.display = 'none';
     generateCard.style.display = 'block';
     const s = document.getElementById('approvalSuccess');
     if (s) s.innerHTML = `✅ <strong>${data.extracted_task_count || 'New'} tasks added to PM Library for ${data.machine_id || 'the machine'}.</strong> You can now generate PM documents using these tasks.`;
@@ -920,10 +994,11 @@ async function submitGenerate2(e) {
 
 async function generateZip() {
   if (!_currentManualId) return;
-  const machineId = document.getElementById('review-machine-select')?.value || '';
+  // machine select may not exist in the new review card — use any available select
+  const machineId = (document.getElementById('review-machine-select') || document.getElementById('gen-machine'))?.value || '';
   const btn = document.getElementById('generateZipBtn');
   const alertEl = document.getElementById('zipAlert');
-  alertEl.innerHTML = '';
+  if (alertEl) alertEl.innerHTML = '';
   btn.disabled = true;
   btn.textContent = '⏳ Generating ZIP...';
   try {
@@ -1022,9 +1097,9 @@ async function loadUploads() {
         <td style="font-size:11px">${u.uploaded_by || '—'}</td>
         <td>
           ${u.status === 'PENDING_REVIEW'
-            ? `<button class="btn btn-success btn-sm" onclick="resumePipelineReview('${u.manual_id}')">✓ Review</button>`
+            ? `<a class="btn btn-success btn-sm" href="/frontend/review.html?id=${u.manual_id}" style="text-decoration:none">📋 Review →</a>`
             : u.status === 'APPROVED'
-              ? `<button class="btn btn-outline btn-sm" onclick="quickGenerate('${u.machine_id || ''}',8)">Generate</button>`
+              ? `<a class="btn btn-outline btn-sm" href="/frontend/review.html?id=${u.manual_id}" style="text-decoration:none">✅ View</a>`
               : `<button class="btn btn-outline btn-sm" onclick="refreshUploadStatus('${u.manual_id}')">↻ Status</button>`}
         </td>
       </tr>`).join('');

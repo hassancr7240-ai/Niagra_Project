@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PM Review — Task Approval</title>
+<style>
+/* ─── Reset & tokens ─────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --navy:   #1B3A6B;
+  --navy-d: #0F2549;
+  --slate:  #0F172A;
+  --green:  #059669;
+  --green-l:#D1FAE5;
+  --amber:  #D97706;
+  --amber-l:#FEF3C7;
+  --rose:   #DC2626;
+  --rose-l: #FEE2E2;
+  --sky:    #0284C7;
+  --sky-l:  #E0F2FE;
+  --g50:    #F8FAFC;
+  --g100:   #F1F5F9;
+  --g200:   #E2E8F0;
+  --g300:   #CBD5E1;
+  --g400:   #94A3B8;
+  --g500:   #64748B;
+  --g700:   #334155;
+  --g900:   #0F172A;
+  --white:  #FFFFFF;
+  --font:   system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:   'Cascadia Code','Consolas','JetBrains Mono',monospace;
+  --r:      6px;
+  --sh:     0 1px 3px rgba(0,0,0,.08),0 4px 12px rgba(0,0,0,.06);
+}
+html,body{height:100%;overflow:hidden}
+body{font-family:var(--font);color:var(--g900);background:var(--g50);display:flex;flex-direction:column}
+
+/* ─── Topbar ─────────────────────────────────────────────────── */
+.topbar{
+  background:var(--slate);color:#fff;
+  display:flex;align-items:center;gap:0;
+  height:54px;flex-shrink:0;
+  padding:0 20px;
+  box-shadow:0 2px 8px rgba(0,0,0,.3);
+  z-index:100;
+}
+.topbar-brand{display:flex;align-items:center;gap:12px;margin-right:20px}
+.topbar-brand img{height:30px;border-radius:4px;opacity:.92}
+.topbar-brand .brand-name{font-size:13px;font-weight:700;letter-spacing:.3px;color:#fff}
+.topbar-brand .brand-sub{font-size:10px;color:rgba(255,255,255,.45);letter-spacing:.3px;display:block;margin-top:1px}
+.topbar-sep{width:1px;background:rgba(255,255,255,.1);height:32px;margin:0 16px}
+.topbar-manual{flex:1;min-width:0}
+.topbar-manual .mfr{font-size:13px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topbar-manual .sub{font-size:10px;color:rgba(255,255,255,.5);margin-top:1px}
+.topbar-right{display:flex;align-items:center;gap:10px;margin-left:16px;flex-shrink:0}
+.status-chip{
+  font-size:10px;font-weight:800;letter-spacing:.6px;
+  padding:4px 12px;border-radius:20px;text-transform:uppercase;
+}
+.chip-pending{background:rgba(217,119,6,.25);color:#FCD34D}
+.chip-approved{background:rgba(5,150,105,.25);color:#6EE7B7}
+.chip-rejected{background:rgba(220,38,38,.22);color:#FCA5A5}
+
+.back-link{
+  display:flex;align-items:center;gap:5px;
+  color:rgba(255,255,255,.55);font-size:12px;font-weight:600;
+  text-decoration:none;padding:5px 10px;border-radius:4px;
+  transition:color .15s,background .15s;
+  flex-shrink:0;
+}
+.back-link:hover{color:#fff;background:rgba(255,255,255,.08)}
+
+/* ─── Strip ──────────────────────────────────────────────────── */
+.strip{
+  background:#fff;border-bottom:1px solid var(--g200);
+  padding:8px 20px;display:flex;align-items:center;
+  gap:0;flex-shrink:0;overflow-x:auto;
+}
+.strip-item{display:flex;align-items:center;gap:6px;padding:0 16px;white-space:nowrap}
+.strip-item:first-child{padding-left:0}
+.strip-label{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--g400)}
+.strip-val{font-size:12.5px;font-weight:700;color:var(--navy)}
+.strip-dot{color:var(--g200);font-size:14px}
+.count-pill{font-size:10px;font-weight:700;padding:2px 8px;border-radius:12px}
+.cp-verified{background:var(--green-l);color:#065F46}
+.cp-unverified{background:var(--amber-l);color:#92400E}
+.cp-safety{background:var(--rose-l);color:#991B1B}
+.cp-cite{background:var(--sky-l);color:#075985}
+
+/* ─── Interval tabs ──────────────────────────────────────────── */
+.tab-bar{
+  background:#fff;border-bottom:2px solid var(--g200);
+  padding:0 20px;display:flex;align-items:flex-end;gap:0;
+  flex-shrink:0;overflow-x:auto;
+}
+.tab-btn{
+  padding:11px 20px 10px;
+  font-size:12.5px;font-weight:700;
+  color:var(--g500);
+  border:none;background:none;cursor:pointer;
+  border-bottom:3px solid transparent;
+  margin-bottom:-2px;
+  white-space:nowrap;
+  transition:color .15s,border-color .15s;
+  display:flex;align-items:center;gap:7px;
+  letter-spacing:.2px;
+}
+.tab-btn:hover{color:var(--navy)}
+.tab-btn.active{color:var(--navy);border-bottom-color:var(--navy)}
+.tab-count{
+  font-size:10px;font-weight:800;
+  padding:2px 7px;border-radius:12px;
+  background:var(--g100);color:var(--g500);
+  transition:background .15s,color .15s;
+}
+.tab-btn.active .tab-count{background:#DBEAFE;color:#1E40AF}
+
+/* ─── Main body (table + drawer) ─────────────────────────────── */
+.body-split{
+  flex:1;display:grid;grid-template-columns:1fr 360px;
+  overflow:hidden;
+  min-height:0;
+}
+.body-split.drawer-hidden{grid-template-columns:1fr 0}
+
+/* ─── Task table area ────────────────────────────────────────── */
+.table-area{
+  display:flex;flex-direction:column;overflow:hidden;
+  border-right:1px solid var(--g200);
+}
+.table-header{
+  padding:12px 20px;background:#fff;
+  border-bottom:1px solid var(--g200);
+  display:flex;align-items:center;gap:12px;flex-shrink:0;
+}
+.table-header-title{font-size:13px;font-weight:700;color:var(--navy);flex:1}
+.table-header-actions{display:flex;align-items:center;gap:8px}
+
+.table-scroll{overflow-y:auto;flex:1}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{
+  background:var(--navy);color:#fff;
+  padding:9px 12px;text-align:left;
+  font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+  position:sticky;top:0;z-index:10;white-space:nowrap;
+}
+thead th:first-child{border-radius:0}
+tbody tr{
+  border-bottom:1px solid var(--g100);
+  cursor:pointer;transition:background .1s;
+}
+tbody tr:hover{background:#F0F7FF}
+tbody tr.selected{background:#EFF6FF;border-left:3px solid var(--navy)}
+tbody tr.safety-row{border-left:3px solid var(--rose)}
+tbody tr.safety-row.selected{background:#FFF5F5;border-left-color:var(--rose)}
+td{padding:9px 12px;vertical-align:top}
+
+/* Task number */
+td.td-seq{
+  font-size:11px;font-weight:800;color:var(--g400);
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+/* Area */
+td.td-area{font-size:11px;font-weight:700;color:var(--navy);white-space:nowrap}
+/* Action chip */
+.action-chip{
+  display:inline-block;font-size:10px;font-weight:800;
+  padding:2px 8px;border-radius:4px;letter-spacing:.4px;
+  text-transform:uppercase;white-space:nowrap;
+}
+.ac-lockout{background:#FEE2E2;color:#991B1B}
+.ac-check{background:#EFF6FF;color:#1E40AF}
+.ac-inspect{background:#EFF6FF;color:#1E40AF}
+.ac-clean{background:#E0F2FE;color:#0369A1}
+.ac-replace{background:#FEF3C7;color:#92400E}
+.ac-lubricate{background:#D1FAE5;color:#065F46}
+.ac-verify{background:#FAF5FF;color:#6B21A8}
+.ac-test{background:#F0FDF4;color:#14532D}
+.ac-confirm{background:#F8FAFC;color:#475569}
+/* Description */
+td.td-desc{line-height:1.45;color:var(--g700);max-width:280px}
+/* Page number — the hero feature */
+td.td-page{white-space:nowrap;vertical-align:middle}
+.page-badge{
+  display:inline-flex;align-items:center;gap:4px;
+  background:var(--navy);color:#fff;
+  font-size:10.5px;font-weight:800;
+  padding:3px 9px;border-radius:4px;
+  font-variant-numeric:tabular-nums;
+  cursor:pointer;white-space:nowrap;
+  transition:background .12s,transform .12s;
+  border:none;
+}
+.page-badge:hover{background:var(--navy-d);transform:scale(1.04)}
+.page-badge svg{width:11px;height:11px;opacity:.7;flex-shrink:0}
+/* Section */
+td.td-section{font-size:11px;color:var(--g500);max-width:140px;line-height:1.4}
+/* State */
+.state-chip{font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;white-space:nowrap}
+.sc-running{background:#D1FAE5;color:#065F46}
+.sc-stopped{background:#FEF3C7;color:#92400E}
+.sc-powered{background:#EDE9FE;color:#4C1D95}
+/* Validation */
+.v-chip{font-size:10px;font-weight:800;padding:2px 7px;border-radius:4px;white-space:nowrap}
+.vc-ok{background:#D1FAE5;color:#065F46}
+.vc-warn{background:#FEF3C7;color:#92400E}
+/* Safety */
+.loto-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--rose)}
+
+/* Action bar (sticky bottom of table) */
+.action-bar{
+  background:#fff;border-top:1px solid var(--g200);
+  padding:12px 20px;display:flex;align-items:center;gap:10px;
+  flex-shrink:0;flex-wrap:wrap;
+}
+
+.btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:8px 18px;border-radius:var(--r);
+  font-size:12.5px;font-weight:700;cursor:pointer;
+  border:none;transition:all .15s;letter-spacing:.1px;
+  white-space:nowrap;
+}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-approve{background:var(--green);color:#fff}
+.btn-approve:hover:not(:disabled){background:#047857}
+.btn-reject{background:#fff;color:var(--rose);border:1.5px solid #FECACA}
+.btn-reject:hover:not(:disabled){background:var(--rose-l);border-color:var(--rose)}
+.btn-zip{background:var(--navy);color:#fff}
+.btn-zip:hover:not(:disabled){background:var(--navy-d)}
+.btn-outline{background:#fff;color:var(--navy);border:1.5px solid var(--g200)}
+.btn-outline:hover:not(:disabled){background:var(--g50);border-color:var(--navy)}
+.btn-sm{padding:5px 12px;font-size:11.5px}
+
+/* ─── Citations drawer ───────────────────────────────────────── */
+.cite-drawer{
+  display:flex;flex-direction:column;overflow:hidden;
+  background:#fff;
+  transition:width .2s;
+}
+.cite-drawer-head{
+  padding:12px 16px;border-bottom:1px solid var(--g200);flex-shrink:0;
+}
+.cite-drawer-head h3{font-size:12.5px;font-weight:700;color:var(--navy);margin-bottom:8px}
+.cite-type-row{display:flex;flex-wrap:wrap;gap:4px}
+.type-pill{
+  font-size:10px;font-weight:700;padding:3px 9px;
+  border-radius:20px;cursor:pointer;border:1.5px solid var(--g200);
+  background:var(--g50);color:var(--g500);
+  text-transform:uppercase;letter-spacing:.3px;
+  transition:all .12s;
+}
+.type-pill:hover{border-color:var(--navy);color:var(--navy)}
+.type-pill.tp-active{background:var(--navy);color:#fff;border-color:var(--navy)}
+.tp-loto{border-color:#FECACA;color:#991B1B;background:var(--rose-l)}
+.tp-loto.tp-active{background:var(--rose);color:#fff;border-color:var(--rose)}
+.tp-ppe{border-color:#FDE68A;color:#92400E;background:var(--amber-l)}
+.tp-ppe.tp-active{background:var(--amber);color:#fff;border-color:var(--amber)}
+.tp-warning{border-color:#FED7AA;color:#9A3412;background:#FFF7ED}
+.tp-warning.tp-active{background:#EA580C;color:#fff;border-color:#EA580C}
+
+.cite-scroll{overflow-y:auto;flex:1;padding:10px}
+
+.cite-empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:100%;padding:30px 20px;text-align:center;color:var(--g400);
+}
+.cite-empty-ico{font-size:36px;margin-bottom:10px;opacity:.5}
+.cite-empty p{font-size:12px;line-height:1.6;max-width:200px}
+
+.cite-card{
+  border:1.5px solid var(--g200);border-radius:var(--r);
+  margin-bottom:8px;overflow:hidden;
+}
+.cite-card-head{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 12px;background:var(--g50);
+  border-bottom:1px solid var(--g200);
+}
+.page-num{
+  background:var(--navy);color:#fff;
+  font-size:10.5px;font-weight:800;
+  padding:3px 9px;border-radius:4px;
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+  flex-shrink:0;
+}
+.cite-section-name{
+  font-size:11px;color:var(--g700);font-weight:600;
+  flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.ctype-tag{
+  font-size:9.5px;font-weight:800;padding:2px 7px;
+  border-radius:4px;text-transform:uppercase;letter-spacing:.3px;
+  flex-shrink:0;
+}
+.ct-procedure{background:#EFF6FF;color:#1E40AF}
+.ct-loto,.ct-lockout{background:var(--rose-l);color:#991B1B}
+.ct-ppe{background:var(--amber-l);color:#92400E}
+.ct-warning{background:#FFF7ED;color:#9A3412}
+.ct-parts_list{background:#D1FAE5;color:#065F46}
+.ct-toc{background:#FAF5FF;color:#6B21A8}
+.ct-startup{background:#E0F2FE;color:#0369A1}
+.ct-table{background:#F0FDF4;color:#14532D}
+
+.cite-card-body{padding:9px 12px}
+.excerpt{
+  font-size:11.5px;color:var(--g500);
+  line-height:1.55;font-style:italic;
+  display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;
+}
+
+/* JSON block */
+.json-row{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+.json-toggle-btn{
+  font-size:10px;color:var(--g400);cursor:pointer;
+  border:1px solid var(--g200);background:none;
+  border-radius:4px;padding:2px 8px;
+  transition:all .12s;display:flex;align-items:center;gap:4px;
+}
+.json-toggle-btn:hover{background:var(--g100);color:var(--g700)}
+.json-block{
+  display:none;background:#0F172A;
+  border-radius:6px;padding:12px;
+  font-family:var(--mono);font-size:10.5px;
+  line-height:1.6;margin-top:8px;
+  overflow-x:auto;max-height:200px;overflow-y:auto;
+}
+.jk{color:#7DD3FC} /* key */
+.jv{color:#86EFAC} /* string val */
+.jn{color:#F9A8D4} /* null */
+.ji{color:#FCA5A5} /* number */
+
+/* ─── Modals ─────────────────────────────────────────────────── */
+.overlay{
+  display:none;position:fixed;inset:0;
+  background:rgba(15,23,42,.55);backdrop-filter:blur(3px);
+  z-index:500;align-items:center;justify-content:center;
+}
+.overlay.open{display:flex}
+.modal-box{
+  background:#fff;border-radius:12px;
+  padding:28px;max-width:440px;width:92%;
+  box-shadow:0 25px 60px rgba(0,0,0,.35);
+  animation:modalIn .2s ease;
+}
+@keyframes modalIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.modal-title{font-size:16px;font-weight:800;margin-bottom:6px}
+.modal-title.t-reject{color:var(--rose)}
+.modal-title.t-approve{color:var(--green)}
+.modal-body{font-size:12.5px;color:var(--g500);margin-bottom:16px;line-height:1.6}
+.modal-textarea{
+  width:100%;min-height:96px;padding:10px 12px;
+  border:1.5px solid var(--g200);border-radius:var(--r);
+  font-size:13px;font-family:var(--font);resize:vertical;
+  transition:border-color .15s;
+}
+.modal-textarea:focus{outline:none;border-color:var(--rose)}
+.modal-foot{display:flex;gap:8px;margin-top:14px}
+
+/* ─── Toast ──────────────────────────────────────────────────── */
+.toast{
+  position:fixed;bottom:24px;right:24px;z-index:999;
+  padding:12px 18px;border-radius:8px;font-size:13px;font-weight:700;
+  box-shadow:0 8px 24px rgba(0,0,0,.25);
+  opacity:0;transform:translateY(8px);
+  transition:all .22s;pointer-events:none;
+  display:flex;align-items:center;gap:8px;
+}
+.toast.show{opacity:1;transform:none}
+.toast-ok{background:#065F46;color:#fff}
+.toast-err{background:#991B1B;color:#fff}
+.toast-info{background:var(--navy-d);color:#fff}
+
+/* ─── Spinner ────────────────────────────────────────────────── */
+.spin{
+  width:18px;height:18px;border-radius:50%;
+  border:2px solid rgba(255,255,255,.3);border-top-color:#fff;
+  animation:rot .6s linear infinite;display:inline-block;
+}
+@keyframes rot{to{transform:rotate(360deg)}}
+
+/* ─── Approved banner ────────────────────────────────────────── */
+.approved-bar{
+  background:linear-gradient(135deg,#065F46,#047857);
+  color:#fff;padding:14px 20px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+}
+.approved-bar strong{font-size:14px}
+.approved-bar span{font-size:12px;opacity:.8}
+
+/* ─── Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--g300);border-radius:3px}
+
+/* ─── No tasks ───────────────────────────────────────────────── */
+.no-tasks{padding:60px 30px;text-align:center;color:var(--g400)}
+.no-tasks .ico{font-size:40px;margin-bottom:10px;opacity:.5}
+.no-tasks p{font-size:12.5px;line-height:1.6}
+
+@media(max-width:820px){
+  .body-split{grid-template-columns:1fr!important}
+  .cite-drawer{display:none}
+}
+</style>
+</head>
+<body>
+
+<!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+<header class="topbar">
+  <a href="/frontend/dashboard.html" class="back-link">
+    <svg viewBox="0 0 16 16" width="13" fill="currentColor"><path d="M10 12L6 8l4-4"/></svg>
+    Dashboard
+  </a>
+  <div class="topbar-sep"></div>
+  <div class="topbar-brand">
+    <img src="/frontend/images (1).jpg" alt="Niagara"/>
+    <div>
+      <span class="brand-name">PM Automation</span>
+      <span class="brand-sub">REVIEW &amp; APPROVAL</span>
+    </div>
+  </div>
+  <div class="topbar-sep"></div>
+  <div class="topbar-manual">
+    <div class="mfr" id="topMfr">Loading…</div>
+    <div class="sub" id="topSub">AI-extracted PM tasks — awaiting engineer review</div>
+  </div>
+  <div class="topbar-right">
+    <span class="status-chip" id="statusChip">…</span>
+    <div class="topbar-sep" style="margin:0 4px"></div>
+    <span style="font-size:11px;color:rgba(255,255,255,.4)" id="userLabel"></span>
+  </div>
+</header>
+
+<!-- ── Info strip ──────────────────────────────────────────────────────── -->
+<div class="strip" id="infoStrip">
+  <div class="strip-item"><span class="strip-label">Loading…</span></div>
+</div>
+
+<!-- ── Interval tabs ───────────────────────────────────────────────────── -->
+<div class="tab-bar" id="tabBar">
+  <button class="tab-btn active">All Tasks</button>
+</div>
+
+<!-- ── Body split ──────────────────────────────────────────────────────── -->
+<div class="body-split" id="bodySplit">
+
+  <!-- LEFT: task table -->
+  <div class="table-area">
+    <div class="table-header">
+      <span class="table-header-title" id="tableTitle">Tasks</span>
+      <div class="table-header-actions">
+        <button class="btn btn-outline btn-sm" onclick="toggleDrawer()">📎 Citations</button>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Area</th>
+            <th>Action</th>
+            <th>Description</th>
+            <th style="min-width:80px">Page</th>
+            <th>Section</th>
+            <th>State</th>
+            <th>Safety</th>
+            <th>Verify</th>
+          </tr>
+        </thead>
+        <tbody id="taskTbody">
+          <tr><td colspan="9" class="no-tasks"><div class="ico">⏳</div><p>Loading tasks…</p></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="action-bar" id="actionBar">
+      <!-- Machine is determined at upload — shown read-only here -->
+      <div id="machineMeta" style="flex:1;min-width:0">
+        <div style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--g400);margin-bottom:3px">Machine</div>
+        <div style="font-size:13px;font-weight:700;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="machineNameDisplay">—</div>
+      </div>
+      <!-- Hidden fallback select — only revealed if machine_id was not set at upload -->
+      <div id="machineFallback" style="display:none;flex:1;min-width:160px">
+        <div style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--rose);margin-bottom:3px">⚠ Select Machine</div>
+        <select id="machineSelect" style="padding:7px 10px;border:1.5px solid var(--rose);border-radius:6px;font-size:12px;font-weight:600;color:var(--navy);background:#fff;width:100%">
+          <option value="">— required —</option>
+        </select>
+      </div>
+      <button class="btn btn-approve" id="approveBtn" onclick="openApproveModal()" disabled>✓ Approve</button>
+      <button class="btn btn-reject"  id="rejectBtn"  onclick="openRejectModal()"  disabled>✕ Reject</button>
+      <button class="btn btn-zip"     id="zipBtn"     onclick="downloadZip()"       disabled>⬇ ZIP</button>
+    </div>
+  </div>
+
+  <!-- RIGHT: citations drawer -->
+  <div class="cite-drawer" id="citeDrawer">
+    <div class="cite-drawer-head">
+      <h3>📎 Source Citations</h3>
+      <div class="cite-type-row" id="citeTypeRow">
+        <button class="type-pill tp-active" data-type="all" onclick="filterCite('all',this)">All</button>
+      </div>
+    </div>
+    <div class="cite-scroll" id="citeScroll">
+      <div class="cite-empty">
+        <div class="cite-empty-ico">📄</div>
+        <p>Select a task row to highlight relevant citations, or browse all sources here.</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Reject modal ────────────────────────────────────────────────────── -->
+<div class="overlay" id="rejectModal">
+  <div class="modal-box">
+    <div class="modal-title t-reject">✕ Reject Manual</div>
+    <p class="modal-body">A rejection comment is required and will be saved to the GMP audit log. Be specific — what needs to be corrected?</p>
+    <textarea class="modal-textarea" id="rejectText"
+      placeholder="e.g. Missing LOTO procedures for conveyor belt section. Task #30 interval should be 2000hr not 500hr. Section 4.2 tasks not extracted correctly…"></textarea>
+    <div class="modal-foot">
+      <button class="btn btn-reject" style="flex:1" onclick="submitReject()">Confirm Rejection</button>
+      <button class="btn btn-outline" onclick="closeModal('rejectModal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Approve modal ───────────────────────────────────────────────────── -->
+<div class="overlay" id="approveModal">
+  <div class="modal-box">
+    <div class="modal-title t-approve" id="approveModalTitle">✓ Approve Tasks</div>
+    <p class="modal-body" id="approveModalBody">Confirming will add all extracted tasks to the PM Library and mark this manual as approved.</p>
+    <div class="modal-foot">
+      <button class="btn btn-approve" style="flex:1" onclick="submitApprove()">Confirm Approval</button>
+      <button class="btn btn-outline" onclick="closeModal('approveModal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast ───────────────────────────────────────────────────────────── -->
+<div class="toast" id="toast"></div>
+
+<script>
+/* ─── State ───────────────────────────────────────────────────────────── */
+const API = '';
+let manualId = null;
+let allTasks = [];
+let allCitations = [];
+let currentInterval = 'all';   // 'all' | number
+let currentCiteType = 'all';
+let selectedTaskRow = null;
+let drawerOpen = true;
+let uploadData = null;
+
+/* ─── Auth ────────────────────────────────────────────────────────────── */
+async function freshToken() {
+  let t = localStorage.getItem('pm_token');
+  if (!t) return null;
+  try {
+    const p = JSON.parse(atob(t.split('.')[1]));
+    if (Date.now() > p.exp * 1000 - 600000) {
+      const u = JSON.parse(localStorage.getItem('pm_user') || '{}');
+      if (u.email) {
+        const r = await fetch('/dev/token', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({email:u.email, name:u.name||u.email, role:u.role||'Manager'}),
+        });
+        if (r.ok) { const d = await r.json(); t = d.access_token; localStorage.setItem('pm_token', t); }
+      }
+    }
+  } catch(e) {}
+  return t;
+}
+
+async function apiFetch(path, opts={}) {
+  const t = await freshToken();
+  const headers = {'Content-Type':'application/json', ...(opts.headers||{})};
+  if (t) headers['Authorization'] = `Bearer ${t}`;
+  const r = await fetch(API + path, {...opts, headers});
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try { const b = await r.json(); msg = b.detail || msg; } catch(e) {}
+    throw new Error(msg);
+  }
+  return r;
+}
+async function apiJSON(path, opts={}) { return (await apiFetch(path, opts)).json(); }
+
+/* ─── Init ────────────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', async () => {
+  if (!localStorage.getItem('pm_token')) { location.href = '/frontend/index.html'; return; }
+  const params = new URLSearchParams(location.search);
+  manualId = params.get('id');
+  if (!manualId) { toast('No manual ID in URL', 'err'); return; }
+
+  const u = JSON.parse(localStorage.getItem('pm_user') || '{}');
+  document.getElementById('userLabel').textContent = u.name || u.email || '';
+
+  await Promise.all([ loadMachines(), loadAll() ]);
+
+  // Auto-select interval tab if URL contains ?interval=NNN
+  const ivParam = params.get('interval');
+  if (ivParam) {
+    window._autoInterval = parseInt(ivParam, 10);
+  }
+});
+
+let allMachines = [];
+
+async function loadMachines() {
+  try {
+    const d = await apiJSON('/api/machines');
+    allMachines = d.machines || d || [];
+    // Populate fallback select (only shown when machine_id unknown)
+    const sel = document.getElementById('machineSelect');
+    if (sel) {
+      allMachines.forEach(m => {
+        const o = document.createElement('option');
+        o.value = m.machine_id;
+        o.textContent = m.name;
+        sel.appendChild(o);
+      });
+    }
+  } catch(e) {}
+}
+
+function _getMachineName(machineId) {
+  if (!machineId) return null;
+  const m = allMachines.find(x => x.machine_id === machineId);
+  return m ? m.name : machineId;
+}
+
+async function loadAll() {
+  try {
+    const [upload, citations] = await Promise.all([
+      apiJSON(`/api/manual/uploads/${manualId}`),
+      apiJSON(`/api/manual/uploads/${manualId}/citations`).catch(() => []),
+    ]);
+    uploadData = upload;
+    allTasks = upload.extracted_tasks || [];
+    allCitations = citations || [];
+
+    renderStrip(upload);
+    renderStatusChip(upload.status);
+    buildIntervalTabs(allTasks);
+    buildCiteTypeFilters(allCitations);
+
+    // If URL had ?interval=NNN, activate that tab
+    if (window._autoInterval) {
+      const btn = document.querySelector(`.tab-btn[data-iv="${window._autoInterval}"]`);
+      if (btn) { btn.click(); }
+      else { renderTable(allTasks); }
+    } else {
+      renderTable(allTasks);
+    }
+    if (!window._autoInterval) renderCitations(allCitations);
+
+    // Show machine — read-only if known, fallback dropdown only if missing
+    const mname = _getMachineName(upload.machine_id) || upload.detected_manufacturer || null;
+    const nameEl = document.getElementById('machineNameDisplay');
+    if (mname && upload.machine_id) {
+      if (nameEl) nameEl.textContent = mname;
+    } else {
+      // Machine not set at upload — surface the fallback selector
+      document.getElementById('machineMeta').style.display = 'none';
+      document.getElementById('machineFallback').style.display = 'flex';
+      document.getElementById('machineFallback').style.flexDirection = 'column';
+      if (nameEl) nameEl.textContent = '—';
+    }
+
+    const ready = upload.status === 'PENDING_REVIEW';
+    const approved = upload.status === 'APPROVED';
+    document.getElementById('approveBtn').disabled = approved || !ready;
+    document.getElementById('rejectBtn').disabled  = approved && false; // allow re-reject
+    document.getElementById('zipBtn').disabled = !(ready || approved);
+
+    if (approved) showApprovedBar(upload);
+  } catch(e) {
+    toast('Failed to load: ' + e.message, 'err');
+  }
+}
+
+/* ─── Strip ───────────────────────────────────────────────────────────── */
+function renderStrip(d) {
+  const mfr = d.detected_manufacturer || '—';
+  const cnt = allTasks.length;
+  const verified   = allTasks.filter(t => t.validation_status === 'VERIFIED').length;
+  const unverified = allTasks.filter(t => t.validation_status === 'UNVERIFIED').length;
+  const safety     = allTasks.filter(t => t.safety_flag).length;
+  const intervals  = [...new Set(allTasks.map(t=>t.interval_hours).filter(Boolean))];
+
+  document.getElementById('topMfr').textContent = `Review: ${mfr}`;
+  document.getElementById('topSub').textContent = `${cnt} tasks · ${intervals.length} PM intervals · ${allCitations.length} citations`;
+
+  document.getElementById('infoStrip').innerHTML = [
+    `<div class="strip-item"><span class="strip-label">Manufacturer</span><span class="strip-val">${mfr}</span></div>`,
+    `<span class="strip-dot">·</span>`,
+    `<div class="strip-item"><span class="strip-label">Tasks</span><span class="strip-val">${cnt}</span></div>`,
+    `<span class="strip-dot">·</span>`,
+    `<div class="strip-item"><span class="count-pill cp-verified">${verified} verified</span></div>`,
+    unverified ? `<div class="strip-item"><span class="count-pill cp-unverified">${unverified} unverified</span></div>` : '',
+    safety     ? `<div class="strip-item"><span class="count-pill cp-safety">🔒 ${safety} LOTO</span></div>` : '',
+    `<span class="strip-dot">·</span>`,
+    `<div class="strip-item"><span class="count-pill cp-cite">📎 ${allCitations.length} citations</span></div>`,
+    `<span class="strip-dot">·</span>`,
+    `<div class="strip-item"><span class="strip-label">Uploaded by</span><span class="strip-val">${d.uploaded_by||'—'}</span></div>`,
+    `<span class="strip-dot">·</span>`,
+    `<div class="strip-item"><span class="strip-label">Date</span><span class="strip-val">${d.created_at ? new Date(d.created_at).toLocaleDateString() : '—'}</span></div>`,
+  ].join('');
+}
+
+function renderStatusChip(status) {
+  const el = document.getElementById('statusChip');
+  const map = {
+    PENDING_REVIEW: ['chip-pending','PENDING REVIEW'],
+    APPROVED:       ['chip-approved','✓ APPROVED'],
+    REJECTED:       ['chip-rejected','✕ REJECTED'],
+    FAILED:         ['chip-rejected','FAILED'],
+  };
+  const [cls, lbl] = map[status] || ['chip-pending', status];
+  el.className = `status-chip ${cls}`;
+  el.textContent = lbl;
+}
+
+/* ─── Interval tabs ───────────────────────────────────────────────────── */
+function buildIntervalTabs(tasks) {
+  const hours = [...new Set(tasks.map(t=>t.interval_hours).filter(Boolean))].sort((a,b)=>a-b);
+  const bar = document.getElementById('tabBar');
+  const allCount = tasks.length;
+
+  const label = h => {
+    const map = {8:'8hr / Daily',120:'120hr / ~2wk',250:'250hr',500:'500hr / Monthly',
+      1000:'1000hr',1500:'1500hr / Quarterly',2000:'2000hr',3000:'3000hr / 6-Month',
+      4000:'4000hr',6000:'6000hr / Annual',42000:'42000hr / 7yr'};
+    return map[h] || `${h}hr`;
+  };
+
+  bar.innerHTML = [
+    `<button class="tab-btn active" data-iv="all" onclick="selectTab('all',this)">
+      All Tasks <span class="tab-count">${allCount}</span>
+    </button>`,
+    ...hours.map(h => {
+      const cnt = tasks.filter(t=>t.interval_hours===h).length;
+      return `<button class="tab-btn" data-iv="${h}" onclick="selectTab(${h},this)">
+        ${label(h)} <span class="tab-count">${cnt}</span>
+      </button>`;
+    }),
+  ].join('');
+}
+
+function selectTab(iv, btn) {
+  currentInterval = iv;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const filtered = iv === 'all' ? allTasks : allTasks.filter(t => t.interval_hours === iv);
+  const label = btn.textContent.trim().replace(/\d+$/, '').trim();
+  document.getElementById('tableTitle').textContent =
+    iv === 'all' ? `All Tasks (${filtered.length})` : `${label} — ${filtered.length} tasks`;
+  renderTable(filtered);
+  selectedTaskRow = null;
+  renderCitations(allCitations);
+}
+
+/* ─── Table rendering ─────────────────────────────────────────────────── */
+function actionCls(a) {
+  const m = {LOCKOUT:'ac-lockout',CHECK:'ac-check',INSPECT:'ac-inspect',
+    CLEAN:'ac-clean',REPLACE:'ac-replace',LUBRICATE:'ac-lubricate',
+    VERIFY:'ac-verify',TEST:'ac-test',CONFIRM:'ac-confirm',LISTEN:'ac-check'};
+  return m[(a||'').toUpperCase()] || 'ac-check';
+}
+function stateCls(s) {
+  return {RUNNING:'sc-running',STOPPED:'sc-stopped',POWERED_OFF:'sc-powered'}[s] || 'sc-stopped';
+}
+
+function renderTable(tasks) {
+  const tbody = document.getElementById('taskTbody');
+  if (!tasks || tasks.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="9">
+      <div class="no-tasks"><div class="ico">📋</div><p>No tasks for this interval.<br/>Try selecting a different tab.</p></div>
+    </td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = tasks.map((t, idx) => {
+    const safety = t.safety_flag;
+    const vStatus = t.validation_status || 'UNVERIFIED';
+
+    // Match citation to task by content_type derived from action
+    const actionCtypeMap = {LOCKOUT:'loto',VERIFY:'loto',INSPECT:'procedure',
+      CHECK:'procedure',CLEAN:'procedure',REPLACE:'parts_list',
+      LUBRICATE:'procedure',TEST:'procedure',CONFIRM:'procedure',LISTEN:'procedure'};
+    const preferredType = actionCtypeMap[(t.action||'').toUpperCase()] || 'procedure';
+    const cite = allCitations.find(c=>c.content_type===preferredType)
+              || allCitations.find(c=>c.content_type==='procedure')
+              || allCitations[0];
+    const pageStr = cite && cite.page_start
+      ? (cite.page_end && cite.page_end !== cite.page_start
+          ? `${cite.page_start}–${cite.page_end}`
+          : `${cite.page_start}`)
+      : null;
+    const sectionStr = cite ? (cite.section || '') : '';
+
+    return `<tr class="${safety ? 'safety-row' : ''}" data-idx="${idx}" onclick="selectRow(${idx}, this)">
+      <td class="td-seq">${t.task_no || (idx+1)*10}</td>
+      <td class="td-area">${t.area || 'GENERAL'}</td>
+      <td><span class="action-chip ${actionCls(t.action)}">${t.action || 'CHECK'}</span></td>
+      <td class="td-desc">${escHtml(t.description || '')}${t.part_number ? `<br/><span style="font-size:10px;color:var(--g400);margin-top:2px;display:inline-block">🔩 ${t.part_number}</span>` : ''}</td>
+      <td class="td-page">
+        ${pageStr
+          ? `<button class="page-badge" onclick="highlightCiteByIdx(${idx},event)" title="Page ${pageStr}">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="1" width="10" height="14" rx="1.5"/><line x1="4" y1="5" x2="10" y2="5"/><line x1="4" y1="8" x2="10" y2="8"/><line x1="4" y1="11" x2="7" y2="11"/></svg>
+              ${pageStr}
+            </button>`
+          : '<span style="font-size:11px;color:var(--g300)">—</span>'}
+      </td>
+      <td class="td-section">${escHtml(sectionStr)}</td>
+      <td><span class="state-chip ${stateCls(t.machine_state)}">${(t.machine_state||'STOPPED').replace('_',' ')}</span></td>
+      <td style="text-align:center">${safety ? '<span title="LOTO required" style="font-size:14px">🔒</span>' : '<span style="color:var(--g300)">—</span>'}</td>
+      <td><span class="v-chip ${vStatus==='VERIFIED'?'vc-ok':'vc-warn'}">${vStatus==='VERIFIED'?'✅ OK':'⚠️ UNV'}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function selectRow(idx, tr) {
+  document.querySelectorAll('#taskTbody tr').forEach(r => r.classList.remove('selected'));
+  tr.classList.add('selected');
+  selectedTaskRow = idx;
+  // Open drawer if closed
+  if (!drawerOpen) toggleDrawer();
+  renderCitations(allCitations);
+}
+
+function highlightCiteByIdx(taskIdx, e) {
+  e.stopPropagation();
+  selectRow(taskIdx, e.target.closest('tr'));
+  document.getElementById('citeDrawer').querySelector('.cite-scroll').scrollIntoView({behavior:'smooth'});
+}
+
+/* ─── Citations ───────────────────────────────────────────────────────── */
+function buildCiteTypeFilters(citations) {
+  const types = [...new Set(citations.map(c=>c.content_type).filter(Boolean))];
+  const labelMap = {procedure:'⚙️ Procedure',loto:'🔒 LOTO',lockout:'🔒 LOTO',
+    ppe:'🦺 PPE',warning:'⚠️ Warning',parts_list:'🔩 Parts',
+    startup:'▶ Startup',toc:'📑 ToC',table:'📊 Table'};
+  const clsMap = {loto:'tp-loto',lockout:'tp-loto',ppe:'tp-ppe',warning:'tp-warning'};
+
+  const row = document.getElementById('citeTypeRow');
+  row.innerHTML = `<button class="type-pill tp-active" data-type="all" onclick="filterCite('all',this)">All (${citations.length})</button>`
+    + types.map(t => {
+        const cnt = citations.filter(c=>c.content_type===t).length;
+        const cls = clsMap[t] || '';
+        return `<button class="type-pill ${cls}" data-type="${t}" onclick="filterCite('${t}',this)">${labelMap[t]||t} (${cnt})</button>`;
+      }).join('');
+}
+
+function filterCite(type, btn) {
+  currentCiteType = type;
+  document.querySelectorAll('.type-pill').forEach(p=>p.classList.remove('tp-active'));
+  btn.classList.add('tp-active');
+  renderCitations(allCitations);
+}
+
+function renderCitations(citations) {
+  let filtered = currentCiteType === 'all'
+    ? citations
+    : citations.filter(c => c.content_type === currentCiteType);
+
+  // Priority sort: loto > warning > ppe > procedure > rest, then page order
+  const pri = {loto:0,lockout:0,warning:1,ppe:2,procedure:3,startup:4,parts_list:5,toc:6,table:7};
+  filtered = [...filtered].sort((a,b) => {
+    const pa = pri[a.content_type]??8, pb = pri[b.content_type]??8;
+    if (pa!==pb) return pa-pb;
+    return (a.page_start||0)-(b.page_start||0);
+  });
+
+  const scroll = document.getElementById('citeScroll');
+  if (!filtered.length) {
+    scroll.innerHTML = `<div class="cite-empty">
+      <div class="cite-empty-ico">🔍</div>
+      <p>No citations for this filter. Citations are page references saved during AI extraction.</p>
+    </div>`;
+    return;
+  }
+
+  const typeClsMap = {procedure:'ct-procedure',loto:'ct-loto',lockout:'ct-lockout',
+    ppe:'ct-ppe',warning:'ct-warning',parts_list:'ct-parts_list',
+    startup:'ct-startup',toc:'ct-toc',table:'ct-table'};
+  const typeLbl = {procedure:'PROCEDURE',loto:'LOTO',lockout:'LOTO',
+    ppe:'PPE',warning:'WARNING',parts_list:'PARTS',
+    startup:'STARTUP',toc:'TOC',table:'TABLE'};
+
+  scroll.innerHTML = filtered.map((c, ci) => {
+    const pageStr = c.page_start && c.page_end && c.page_end !== c.page_start
+      ? `Pages ${c.page_start}–${c.page_end}`
+      : c.page_start ? `Page ${c.page_start}` : 'Page —';
+    const tClass = typeClsMap[c.content_type] || 'ct-procedure';
+    const tLabel = typeLbl[c.content_type] || (c.content_type||'').toUpperCase();
+    const excerpt = (c.text_excerpt || '').substring(0, 320);
+
+    // Build JSON with syntax highlighting
+    const jsonData = {
+      manual_id: c.manual_id,
+      manual_version: c.manual_version || null,
+      page_start: c.page_start,
+      page_end: c.page_end,
+      section: c.section || null,
+      content_type: c.content_type,
+    };
+    const jsonHtml = syntaxHighlight(JSON.stringify(jsonData, null, 2));
+
+    return `<div class="cite-card" id="cite-${ci}">
+      <div class="cite-card-head">
+        <span class="page-num">📄 ${pageStr}</span>
+        <span class="cite-section-name" title="${escHtml(c.section||'')}">${escHtml(c.section||'Unnamed section')}</span>
+        <span class="ctype-tag ${tClass}">${tLabel}</span>
+      </div>
+      <div class="cite-card-body">
+        ${excerpt ? `<div class="excerpt">"${escHtml(excerpt)}${excerpt.length>=320?'…':''}"</div>` : '<div style="font-size:11px;color:var(--g300);font-style:italic">No excerpt</div>'}
+        <div class="json-row">
+          <button class="json-toggle-btn" onclick="toggleJson(this)">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M2 4h2v8H2zm10 0h2v8h-2zM6 7h4v2H6z"/></svg>
+            { } JSON
+          </button>
+        </div>
+        <pre class="json-block">${jsonHtml}</pre>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function syntaxHighlight(s) {
+  return s
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/("(?:[^"\\]|\\.)*")\s*:/g, '<span class="jk">$1</span>:')
+    .replace(/:\s*("(?:[^"\\]|\\.)*")/g, ': <span class="jv">$1</span>')
+    .replace(/:\s*(null)/g, ': <span class="jn">$1</span>')
+    .replace(/:\s*(-?\d+(?:\.\d+)?)/g, ': <span class="ji">$1</span>');
+}
+
+function toggleJson(btn) {
+  const pre = btn.closest('.cite-card-body').querySelector('.json-block');
+  const vis = pre.style.display === 'block';
+  pre.style.display = vis ? 'none' : 'block';
+  btn.innerHTML = vis
+    ? '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M2 4h2v8H2zm10 0h2v8h-2zM6 7h4v2H6z"/></svg> { } JSON'
+    : '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M2 4h2v8H2zm10 0h2v8h-2zM6 7h4v2H6z"/></svg> { } Hide';
+}
+
+/* ─── Drawer toggle ───────────────────────────────────────────────────── */
+function toggleDrawer() {
+  drawerOpen = !drawerOpen;
+  const split = document.getElementById('bodySplit');
+  split.classList.toggle('drawer-hidden', !drawerOpen);
+}
+
+/* ─── Approve ─────────────────────────────────────────────────────────── */
+function _resolvedMachineId() {
+  // Primary: machine set at upload time. Fallback: user picks from dropdown (edge case).
+  return uploadData?.machine_id
+    || document.getElementById('machineSelect')?.value
+    || '';
+}
+
+function openApproveModal() {
+  const machineId = _resolvedMachineId();
+  if (!machineId) {
+    toast('No machine assigned — select a machine first', 'err');
+    document.getElementById('machineFallback').style.display = 'flex';
+    document.getElementById('machineFallback').style.flexDirection = 'column';
+    document.getElementById('machineSelect')?.focus();
+    return;
+  }
+  const machineName = _getMachineName(machineId) || machineId;
+  const cnt = allTasks.length;
+  document.getElementById('approveModalTitle').textContent = `✓ Approve ${cnt} Tasks`;
+  document.getElementById('approveModalBody').textContent =
+    `Confirming will add ${cnt} PM tasks to the library for machine "${machineName}" and mark this manual APPROVED.`;
+  openModal('approveModal');
+}
+
+async function submitApprove() {
+  const machineId = _resolvedMachineId();
+  const btn = document.querySelector('#approveModal .btn-approve');
+  btn.innerHTML = '<span class="spin"></span> Approving…';
+  btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('machine_id', machineId);
+    const t = await freshToken();
+    const r = await fetch(`${API}/api/manual/uploads/${manualId}/approve`, {
+      method:'POST', headers:{'Authorization':`Bearer ${t}`}, body:fd,
+    });
+    if (!r.ok) { const e = await r.json().catch(()=>{}); throw new Error(e?.detail||`HTTP ${r.status}`); }
+    const d = await r.json();
+    closeModal('approveModal');
+    renderStatusChip('APPROVED');
+    toast(`✅ Approved — ${d.tasks_added_to_library||0} tasks added to PM Library`, 'ok');
+    document.getElementById('approveBtn').disabled = true;
+    showApprovedBar({...uploadData, machine_id: machineId});
+  } catch(e) {
+    toast('Approval failed: ' + e.message, 'err');
+    btn.innerHTML = 'Confirm Approval';
+    btn.disabled = false;
+  }
+}
+
+function showApprovedBar(d) {
+  const bar = document.getElementById('actionBar');
+  const machineName = _getMachineName(d.machine_id) || d.machine_id || '—';
+  bar.innerHTML = `<div class="approved-bar" style="flex:1;border-radius:6px">
+    <span style="font-size:22px">✅</span>
+    <div style="flex:1">
+      <strong>${allTasks.length} tasks approved</strong>&ensp;
+      <span>${machineName} · Approved by ${d.approved_by || uploadData?.uploaded_by || '—'}</span>
+    </div>
+    <button class="btn btn-zip" onclick="downloadZip()" style="margin-right:6px">⬇ ZIP</button>
+    <button class="btn btn-zip" onclick="downloadZip()" style="background:#0369A1">📊 Excel</button>
+  </div>`;
+}
+
+/* ─── Reject ──────────────────────────────────────────────────────────── */
+function openRejectModal() { openModal('rejectModal'); document.getElementById('rejectText').focus(); }
+
+async function submitReject() {
+  const comment = document.getElementById('rejectText').value.trim();
+  if (!comment) {
+    document.getElementById('rejectText').style.borderColor = 'var(--rose)';
+    toast('Comment is required', 'err');
+    return;
+  }
+  document.getElementById('rejectText').style.borderColor = '';
+  const btn = document.querySelector('#rejectModal .btn-reject');
+  btn.innerHTML = '<span class="spin"></span> Submitting…';
+  btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('comment', comment);
+    fd.append('interval_hours', '0');
+    const t = await freshToken();
+    const r = await fetch(`${API}/api/manual/uploads/${manualId}/reject`, {
+      method:'POST', headers:{'Authorization':`Bearer ${t}`}, body:fd,
+    });
+    if (!r.ok) { const e = await r.json().catch(()=>{}); throw new Error(e?.detail||`HTTP ${r.status}`); }
+    closeModal('rejectModal');
+    renderStatusChip('REJECTED');
+    toast('Manual rejected — recorded in audit log', 'info');
+    document.getElementById('rejectBtn').disabled = true;
+    document.getElementById('approveBtn').disabled = true;
+    document.getElementById('actionBar').innerHTML = `
+      <div style="flex:1;background:var(--rose-l);border:1.5px solid #FECACA;border-radius:6px;padding:12px 16px">
+        <div style="font-size:13px;font-weight:700;color:var(--rose)">✕ Rejected — saved to audit log</div>
+        <div style="font-size:11.5px;color:#7F1D1D;margin-top:3px">${escHtml(comment.substring(0,160))}${comment.length>160?'…':''}</div>
+      </div>`;
+  } catch(e) {
+    toast('Rejection failed: ' + e.message, 'err');
+    btn.innerHTML = 'Confirm Rejection';
+    btn.disabled = false;
+  }
+}
+
+/* ─── ZIP download ────────────────────────────────────────────────────── */
+async function downloadZip() {
+  const machineId = _resolvedMachineId();
+  const btn = document.getElementById('zipBtn') || document.querySelector('.btn-zip');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Building…'; }
+  toast('Building ZIP — please wait…', 'info');
+  try {
+    const path = `/api/manual/uploads/${manualId}/generate-zip${machineId?`?machine_id=${encodeURIComponent(machineId)}`:''}`;
+    const r = await apiFetch(path);
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const fname = cd.match(/filename[*]?=(?:UTF-8'')?([^;\n"]+)/i)?.[1]?.replace(/"/g,'') || 'PM_Checklists.zip';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = decodeURIComponent(fname);
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('✅ ZIP downloaded — check your downloads folder', 'ok');
+  } catch(e) {
+    toast('ZIP failed: ' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ ZIP'; }
+  }
+}
+
+/* ─── Modals ──────────────────────────────────────────────────────────── */
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.overlay').forEach(ov => {
+  ov.addEventListener('click', e => { if (e.target===ov) ov.classList.remove('open'); });
+});
+
+/* ─── Toast ───────────────────────────────────────────────────────────── */
+let _tt = null;
+function toast(msg, type='info') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast toast-${type} show`;
+  if (_tt) clearTimeout(_tt);
+  _tt = setTimeout(() => el.classList.remove('show'), 3600);
+}
+</script>
+</body>
+</html>

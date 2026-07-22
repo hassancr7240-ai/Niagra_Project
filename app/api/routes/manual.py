@@ -151,10 +151,12 @@ async def upload_manual(
         ip_address=user.ip_address,
     )
 
-    # Commit NOW — release the SQLite write lock before the background task starts.
-    # BackgroundTasks run before FastAPI's dependency-generator cleanup, so without
-    # this explicit commit the ORM session holds the write lock for the entire pipeline.
+    # Commit and CLOSE before the background task starts.
+    # FastAPI's BackgroundTasks run before dependency-generator teardown, so the
+    # ORM session stays alive (and holds the SQLite write-lock pool slot) for the
+    # entire pipeline unless we explicitly close it here.
     await db.commit()
+    await db.close()
 
     # Run pipeline in background
     background_tasks.add_task(
@@ -232,12 +234,19 @@ async def get_upload_status(manual_id: str, user: CurrentUserDep, db: DBDep) -> 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
 
     tasks = json.loads(upload.extracted_tasks or "[]")
+    # Extract model from first task's part_number or detect from manufacturer string
+    detected_model = None
+    if upload.detected_manufacturer:
+        parts = upload.detected_manufacturer.split(None, 1)
+        if len(parts) > 1:
+            detected_model = parts[1]
     return {
         "manual_id": upload.manual_id,
         "filename": upload.original_filename,
         "status": upload.status,
         "machine_id": upload.machine_id,
         "detected_manufacturer": upload.detected_manufacturer,
+        "detected_model": detected_model,
         "detected_chapters": json.loads(upload.detected_chapters or "[]"),
         "extracted_task_count": len(tasks),
         "extracted_tasks": tasks if upload.status in ("PENDING_REVIEW", "APPROVED") else [],
@@ -573,7 +582,8 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
     def _raw_update(status: str, error: str = "") -> None:
         """Write status update via raw sqlite3 in autocommit mode — no lock contention."""
         try:
-            conn = sqlite3.connect(db_path, timeout=5, isolation_level=None)
+            conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+            conn.execute("PRAGMA journal_mode=WAL")
             if error:
                 conn.execute(
                     "UPDATE manual_uploads SET status=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
@@ -592,6 +602,7 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
         """Write final pipeline results via raw sqlite3."""
         try:
             conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 "UPDATE manual_uploads SET status='PENDING_REVIEW', extracted_tasks=?, detected_manufacturer=?, detected_chapters=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
                 (extracted_tasks_json, manufacturer, chapters_json, manual_id),

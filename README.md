@@ -1,4 +1,4 @@
-# PM Automation System — Niagara Line 3
+# PM Automation System
 
 Automated Preventive Maintenance checklist generation from machine manuals using RAG (Retrieval-Augmented Generation). Upload a machine manual PDF, the system extracts all PM tasks, groups them by service interval, and generates separate Excel files per interval — matching the Niagara Asset Activity template exactly.
 

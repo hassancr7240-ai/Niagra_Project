@@ -43,9 +43,9 @@ For each task output:
 - interval_hours: the EXACT interval from the manual text. Look for phrases like "every X hours", "every X operating hours", "alle X Betriebsstunden". Convert calendar time: 1 day=8hr, 1 week=120hr, 2 weeks=240hr, 1 month=500hr, 3 months=1500hr, 6 months=3000hr, 1 year=6000hr, 7 years=42000hr
 
 CRITICAL RULES:
-- The interval_hours MUST match what the manual says. If the manual says "every 500 hours", use 500. If it says "every 4000 hours", use 4000. Do NOT default to 8.
+- interval_hours: use the exact number from the manual (500, 1000, 2000, etc.). If you cannot find an interval, use 500 as the default. Do NOT omit or set to 0.
 - Every task description must be in CAPITAL LETTERS
-- Only extract tasks that have a clear maintenance action (check, inspect, replace, clean, lubricate). Do NOT extract warnings, safety descriptions, or general information.
+- Extract tasks that have a clear maintenance action (check, inspect, replace, clean, lubricate, verify, test). Do NOT extract warnings or general information.
 - Return ONLY valid JSON array of task objects, no explanation"""
 
 
@@ -56,7 +56,8 @@ async def extract_tasks_from_chunks(
     interval_hints: Optional[list[int]] = None,
 ) -> list[dict]:
     """Use LLM to extract structured PM tasks from retrieved manual chunks."""
-    combined_text = "\n\n---\n\n".join(c["text"] for c in chunks[:10])
+    # granite3.3:2b has ~4096 token context — cap chunks and chars aggressively
+    combined_text = "\n\n---\n\n".join(c["text"][:600] for c in chunks[:6])
 
     if settings.ai_provider == "watsonx":
         return await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
@@ -77,9 +78,9 @@ async def _extract_ollama(  # Ollama (local IBM Granite) via OpenAI-compatible A
 Known intervals (hours): {interval_hints or 'detect from text'}
 
 Manual text:
-{text[:12000]}
+{text[:3500]}
 
-Extract all maintenance tasks as a JSON array. Validate task_no increments by 10."""
+Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTER",...}}]"""
 
     try:
         response = await client.chat.completions.create(
@@ -89,12 +90,17 @@ Extract all maintenance tasks as a JSON array. Validate task_no increments by 10
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
-            max_tokens=4000,
-            response_format={"type": "json_object"},
+            max_tokens=2000,
+            # NOTE: response_format json_object NOT used — granite3.3:2b crashes Ollama with it
         )
-        content = response.choices[0].message.content or '{"tasks":[]}'
-        data = json.loads(content)
-        tasks = data if isinstance(data, list) else data.get("tasks", [])
+        content = response.choices[0].message.content or "[]"
+        # Model may return a bare array or {"tasks":[...]} wrapper
+        raw = _extract_json_array(content)
+        if raw == "[]":
+            data = json.loads(content) if content.strip().startswith("{") else []
+            tasks = data.get("tasks", []) if isinstance(data, dict) else []
+        else:
+            tasks = json.loads(raw)
         return _validate_tasks(tasks)
     except Exception as exc:
         logger.error("OpenAI task extraction failed: %s", exc)
@@ -158,6 +164,20 @@ def _extract_json_array(text: str) -> str:
     return m.group(0) if m else "[]"
 
 
+_VALID_INTERVALS = {
+    8, 24, 40, 100, 120, 240, 500, 1000, 1500, 2000, 3000, 4000, 5000,
+    6000, 8000, 10000, 12000, 18000, 24000, 30000, 42000, 45000,
+}
+
+
+def _snap_interval(raw: int) -> int:
+    """Snap a raw interval value to the nearest known PM interval."""
+    if raw in _VALID_INTERVALS:
+        return raw
+    # Find closest known interval
+    return min(_VALID_INTERVALS, key=lambda v: abs(v - raw))
+
+
 def _validate_tasks(raw_tasks: list) -> list[dict]:
     """Validate extracted tasks against schema. Auto-fix common issues."""
     valid = []
@@ -173,14 +193,27 @@ def _validate_tasks(raw_tasks: list) -> list[dict]:
         t["area"] = str(t.get("area", "GENERAL")).upper()[:64]
         action = str(t.get("action", "CHECK")).upper()
         t["action"] = action if action in valid_actions else "CHECK"
-        t["description"] = str(t.get("description", "")).upper()
+        desc = str(t.get("description", "")).strip().upper()
+        # If description is missing, synthesise from area + action so the task is not lost
+        if not desc:
+            desc = f"{t['action']} {t['area']}"
+        t["description"] = desc
         state = str(t.get("machine_state", "STOPPED")).upper()
         t["machine_state"] = state if state in valid_states else "STOPPED"
         t["safety_flag"] = bool(t.get("safety_flag", False))
         t["part_number"] = t.get("part_number") or None
-        t["interval_hours"] = int(t.get("interval_hours", 0)) or None
 
-        if t["description"] and t["interval_hours"]:
+        raw_iv = int(t.get("interval_hours") or 0)
+        if raw_iv == 0:
+            # Model didn't fill interval — default to 500hr (monthly) so the task is not silently dropped
+            t["interval_hours"] = 500
+            logger.debug("Task #%d missing interval_hours — defaulted to 500hr", t["task_no"])
+        elif raw_iv not in _VALID_INTERVALS:
+            t["interval_hours"] = _snap_interval(raw_iv)
+        else:
+            t["interval_hours"] = raw_iv
+
+        if t["description"]:
             valid.append(t)
 
     logger.info("Validated %d/%d extracted tasks", len(valid), len(raw_tasks))

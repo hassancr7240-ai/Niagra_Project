@@ -399,6 +399,10 @@ def _guess_intervals(manufacturer: str) -> list[int]:
         return [3000, 6000, 12000, 18000]
     if any(k in mfr for k in ("EISBAR", "DEHUMID")):
         return [500, 42000, 45000]
+    if any(k in mfr for k in ("SIG", "COMBIBLOC", "COMBIFLEX", "SIGPACK")):
+        return [500, 1000, 2000, 5000, 10000]
+    if any(k in mfr for k in ("SIDEL", "SERAC", "BOSCH", "SACMI")):
+        return [500, 1000, 2000, 4000, 8000]
     # Generic fallback — broad set covering most industrial equipment
     return [8, 100, 120, 240, 500, 1000, 1500, 3000, 6000, 12000]
 

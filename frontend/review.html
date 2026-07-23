@@ -656,10 +656,12 @@ async function loadAll() {
     }
     if (!window._autoInterval) renderCitations(allCitations);
 
-    // Show machine — read-only if known, fallback dropdown only if missing
-    const mname = _getMachineName(upload.machine_id) || upload.detected_manufacturer || null;
+    // Show machine — read-only if machine_id is set, fallback dropdown only if truly missing
     const nameEl = document.getElementById('machineNameDisplay');
-    if (mname && upload.machine_id) {
+    if (upload.machine_id) {
+      // machine_id is known — show read-only. allMachines may not be loaded yet so fall back
+      // to the raw id if name lookup returns null (avoids false-positive dropdown on load race).
+      const mname = _getMachineName(upload.machine_id) || upload.detected_manufacturer || upload.machine_id;
       if (nameEl) nameEl.textContent = mname;
     } else {
       // Machine not set at upload — surface the fallback selector

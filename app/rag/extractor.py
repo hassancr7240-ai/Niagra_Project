@@ -37,7 +37,7 @@ For each task output:
 - area: component/area category in CAPITALS (e.g. CONVEYOR, DRIVE SYSTEM, ELECTRICAL, FILTER, LUBRICATION, SAFETY, SENSORS)
 - action: verb in CAPITALS (LOCKOUT, CHECK, CLEAN, REPLACE, LUBRICATE, VERIFY, TEST, CONFIRM, INSPECT)
 - description: full task instruction in CAPITAL LETTERS, include specific details from the manual (part numbers, lubricant types, torque specs, measurements)
-- machine_state: RUNNING (machine producing) | STOPPED (stopped, still powered) | POWERED_OFF (fully isolated)
+- machine_state: RUNNING = task done while machine is producing (visual checks, listening, monitoring temperature/vibration) | STOPPED = machine halted but still powered (adjustments, tightening, alignment, filter cleaning) | POWERED_OFF = full LOTO isolation required (internal access, electrical work, replacing parts inside guards)
 - safety_flag: true if task involves LOTO, E-STOP, power isolation, or entering danger zone
 - part_number: exact part number if mentioned in the text, else null
 - interval_hours: the EXACT interval from the manual text. Look for phrases like "every X hours", "every X operating hours", "alle X Betriebsstunden". Convert calendar time: 1 day=8hr, 1 week=120hr, 2 weeks=240hr, 1 month=500hr, 3 months=1500hr, 6 months=3000hr, 1 year=6000hr, 7 years=42000hr
@@ -198,8 +198,17 @@ def _validate_tasks(raw_tasks: list) -> list[dict]:
         if not desc:
             desc = f"{t['action']} {t['area']}"
         t["description"] = desc
-        state = str(t.get("machine_state", "STOPPED")).upper()
-        t["machine_state"] = state if state in valid_states else "STOPPED"
+        state = str(t.get("machine_state", "")).upper()
+        if state not in valid_states:
+            # Infer from description when AI didn't set a valid state
+            desc_low = t["description"].lower()
+            if any(k in desc_low for k in ("loto", "lockout", "tagout", "de-energi", "powered off")):
+                state = "POWERED_OFF"
+            elif any(k in desc_low for k in ("listen", "monitor", "visual", "observe", "temperature", "vibration", "noise", "while running", "during operation")):
+                state = "RUNNING"
+            else:
+                state = "STOPPED"
+        t["machine_state"] = state
         t["safety_flag"] = bool(t.get("safety_flag", False))
         t["part_number"] = t.get("part_number") or None
 

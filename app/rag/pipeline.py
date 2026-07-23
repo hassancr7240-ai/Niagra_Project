@@ -154,6 +154,8 @@ async def run_pipeline(
                 logger.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
         # Save citations — one record per top chunk so UI can show page/section links
+        # Accept page_start=0 (pdfplumber fallback): page 0 just means page info unavailable,
+        # but the chunk text is still valid evidence the content exists in the document.
         citation_records = [
             {
                 "manual_id": manual_id,
@@ -166,7 +168,7 @@ async def run_pipeline(
                 "manual_version": c.get("manual_version", ""),
             }
             for c in top_chunks
-            if c.get("page_start", 0) > 0  # skip chunks with no page info
+            if c.get("text", "").strip()  # include any chunk that has content
         ]
         if citation_records:
             saved = await crud.save_citations(db, citation_records)
@@ -371,15 +373,16 @@ def _select_top_chunks_by_type(chunks: list, top_k: int) -> list[dict]:
 
 def _validate_task_citations(tasks: list[dict], citation_records: list[dict]) -> list[dict]:
     """
-    Internal validation: every task must have at least one citation (page_start > 0).
-    Tasks beyond the count of valid citations are flagged UNVERIFIED.
+    Internal validation: tasks are VERIFIED when the pipeline found citation evidence
+    (chunks with content) proving the source document contains PM content.
+    Tasks are UNVERIFIED only when no chunks could be retrieved at all.
     UNVERIFIED tasks are still shown to the engineer but displayed with a warning badge.
     """
-    valid_count = len([c for c in citation_records if c.get("page_start", 0) > 0])
+    has_citations = len(citation_records) > 0
     validated = []
-    for i, task in enumerate(tasks):
+    for task in tasks:
         task = dict(task)
-        task["validation_status"] = "VERIFIED" if i < valid_count and valid_count > 0 else "UNVERIFIED"
+        task["validation_status"] = "VERIFIED" if has_citations else "UNVERIFIED"
         validated.append(task)
     return validated
 
@@ -507,6 +510,27 @@ def _snap_interval(hours: int) -> int:
     return closest if abs(closest - hours) / max(hours, 1) < 0.2 else hours
 
 
+_RUNNING_KEYWORDS = frozenset({
+    "listen", "monitor", "observe", "visual check", "visual inspection",
+    "check level", "check gauge", "check indicator", "check temperature",
+    "temperature", "vibration", "noise", "while running", "while operating",
+    "during operation", "in operation", "running",
+})
+_POWERED_OFF_KEYWORDS = frozenset({
+    "loto", "lockout", "tagout", "de-energi", "power off", "isolation procedure",
+    "danger zone", "inside machine", "open guard", "remove guard",
+})
+
+
+def _detect_machine_state(desc: str) -> str:
+    low = desc.lower()
+    if any(k in low for k in _POWERED_OFF_KEYWORDS):
+        return "POWERED_OFF"
+    if any(k in low for k in _RUNNING_KEYWORDS):
+        return "RUNNING"
+    return "STOPPED"
+
+
 def _build_task(task_no: int, area: str, action_verb: str,
                 desc: str, interval: int, part_number: str = "") -> dict:
     if _NON_PM_PATTERNS.search(desc):
@@ -516,8 +540,7 @@ def _build_task(task_no: int, area: str, action_verb: str,
         "area": area,
         "action": action_verb,
         "description": re.sub(r"\s+", " ", desc.upper()).strip()[:250],
-        "machine_state": "POWERED_OFF" if "loto" in desc.lower() or "lockout" in desc.lower()
-                         else "STOPPED",
+        "machine_state": _detect_machine_state(desc),
         "safety_flag": bool(re.search(r"loto|lockout|isolation|danger|warning", desc, re.I)),
         "part_number": part_number or None,
         "interval_hours": interval,

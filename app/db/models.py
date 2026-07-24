@@ -249,6 +249,8 @@ class Citation(Base):
     content_type: Mapped[str] = mapped_column(String(32), default="procedure")
     text_excerpt: Mapped[Optional[str]] = mapped_column(Text)  # first 500 chars for preview
     manual_version: Mapped[Optional[str]] = mapped_column(String(64))
+    manufacturer: Mapped[Optional[str]] = mapped_column(String(128))
+    machine_model: Mapped[Optional[str]] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

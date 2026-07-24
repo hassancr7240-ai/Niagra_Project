@@ -166,6 +166,8 @@ async def run_pipeline(
                 "content_type": c.get("content_type", "procedure"),
                 "text_excerpt": c.get("text", "")[:500],
                 "manual_version": c.get("manual_version", ""),
+                "manufacturer": classification.manufacturer,
+                "machine_model": classification.model,
             }
             for c in top_chunks
             if c.get("text", "").strip()  # include any chunk that has content

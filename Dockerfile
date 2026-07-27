@@ -10,12 +10,19 @@ ENV APP_ENV=${APP_ENV} \
 
 WORKDIR /app
 
-# System deps: gcc for cryptography, curl for healthcheck
+# System deps: gcc for cryptography, curl for healthcheck,
+# Microsoft ODBC Driver 18 for Azure SQL Server connectivity
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
     libssl-dev \
     curl \
+    gnupg2 \
+    apt-transport-https \
+    && curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft-prod.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages

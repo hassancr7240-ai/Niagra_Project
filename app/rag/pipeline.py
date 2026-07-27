@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import crud
-from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
+from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf, _detect_interval as _chunk_detect_interval
 from app.rag.classifier import classify_manual
 from app.rag.embedder import embed_chunks
 from app.rag.extractor import extract_tasks_from_chunks
@@ -20,16 +20,18 @@ from app.rag.retriever import index_chunks, retrieve_top_k
 # ── 8-Pass retrieval config ────────────────────────────────────────────────────
 # Each pass targets a specific content type. For local dev, filters by content_type.
 # For production (Azure AI Search), these become separate hybrid search queries.
+# IMPORTANT: "table" pass is FIRST so maintenance table rows occupy positions 0-14
+# in the selected list — the AI only reads chunks[:20] so table data must come first.
 _RETRIEVAL_PASSES: list[tuple[str, str, int]] = [
     # (pass_name, content_type_filter, max_chunks_per_pass)
-    ("toc_schedule",  "toc",        4),
-    ("warnings",      "warning",    5),
-    ("loto",          "loto",       4),
-    ("interval",      "table",     15),   # interval tasks — table_row + checkbox get priority
-    ("ppe_tools",     "ppe",        4),
-    ("startup",       "startup",    4),
-    ("parts",         "parts_list", 5),
-    ("coverage",      "procedure", 10),   # final sweep — best remaining procedure chunks
+    ("interval",      "table",     15),   # FIRST — maintenance table rows are the primary PM signal
+    ("toc_schedule",  "toc",        3),
+    ("warnings",      "warning",    3),
+    ("loto",          "loto",       3),
+    ("ppe_tools",     "ppe",        3),
+    ("startup",       "startup",    3),
+    ("parts",         "parts_list", 4),
+    ("coverage",      "procedure",  8),   # final sweep — best remaining procedure chunks
 ]
 
 logger = logging.getLogger(__name__)
@@ -111,8 +113,9 @@ async def run_pipeline(
 
         await _update_status(db, manual_id, "EMBEDDING")
 
-        # Merge manufacturer defaults with intervals detected from document structure
-        chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
+        # Merge manufacturer defaults with intervals detected from document structure.
+        # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs).
+        chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
         interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
 
         if settings.ai_provider != "watsonx":
@@ -403,7 +406,7 @@ def _guess_intervals(manufacturer: str) -> list[int]:
     if any(k in mfr for k in ("TETRA", "TEM", "PMRSPL")):
         return [3000, 6000, 12000, 18000]
     if any(k in mfr for k in ("EISBAR", "DEHUMID")):
-        return [500, 42000, 45000]
+        return [1500, 42000, 45000]  # filter=3mo=1500h, sensors=7yr=42000h, wheel=45000h
     if any(k in mfr for k in ("SIG", "COMBIBLOC", "COMBIFLEX", "SIGPACK")):
         return [500, 1000, 2000, 5000, 10000]
     if any(k in mfr for k in ("SIDEL", "SERAC", "BOSCH", "SACMI")):
@@ -623,11 +626,12 @@ def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
                     desc_raw     = str(row[cols.get("desc", cols.get("action", 0))] or "").strip()
                     area_raw     = str(row[cols.get("area", 0)] or "").strip() if "area" in cols else ""
 
-                    # Extract numeric interval
-                    m = re.search(r"(\d{2,6})", interval_raw)
-                    if not m:
+                    # Use unified interval detection — handles "45,000 h", "every 7 years",
+                    # "> 3 months", German formats, etc.
+                    interval = _chunk_detect_interval(interval_raw)
+                    if interval is None:
                         continue
-                    interval = _snap_interval(int(m.group(1)))
+                    interval = _snap_interval(interval)
                     if interval < 8:
                         continue
 
@@ -706,6 +710,12 @@ _TEXT_INTERVAL_RE = re.compile(
     r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
     re.IGNORECASE,
 )
+# Matches "every 7 years:", "approx. every 7-year maintenance:"
+_TEXT_YEAR_RE = re.compile(
+    r"(?:approx\.?\s+)?(?:every\s+)?(\d+)\s*[-–]?\s*years?\b"
+    r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|$)",
+    re.IGNORECASE,
+)
 _BULLET_RE = re.compile(
     r"(?:^|\n)\s*[•–\-\*]\s*(.{10,200}?)(?=\n|$)",
     re.IGNORECASE,
@@ -723,9 +733,13 @@ def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
     for page in pdf.pages:
         text = page.extract_text() or ""
 
-        # Find interval anchors ("Every 500 hours:")
+        # Find interval anchors ("Every 500 hours:", "every 45,000 hours:")
         for m in _TEXT_INTERVAL_RE.finditer(text):
-            hrs_raw = int(m.group(1))
+            try:
+                # Strip thousands separators: "45,000" → 45000, "4.000" → 4000
+                hrs_raw = int(m.group(1).replace(',', '').replace('.', ''))
+            except (ValueError, AttributeError):
+                continue
             snapped = _snap_interval(hrs_raw)
             if snapped not in _VALID_INTERVALS:
                 continue
@@ -736,6 +750,22 @@ def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
                                 _detect_action_verb(task_text), task_text, current_interval)
                 if t:
                     raw.append(t)
+
+        # "every 7 years: replace sensors" style
+        for m in _TEXT_YEAR_RE.finditer(text):
+            try:
+                yr = int(m.group(1))
+            except (ValueError, AttributeError):
+                continue
+            yr_hours = yr * 6000
+            snapped = _snap_interval(yr_hours)
+            task_text = m.group(2).strip()
+            if len(task_text) > 10:
+                t = _build_task(0, _detect_area(task_text),
+                                _detect_action_verb(task_text), task_text, snapped)
+                if t:
+                    raw.append(t)
+                    current_interval = snapped
 
         # Collect bullet points under current interval
         if current_interval:

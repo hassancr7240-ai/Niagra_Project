@@ -695,7 +695,8 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
     )
 
-    chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint})
+    # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs)
+    chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
     interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
 
     if settings.ai_provider != "watsonx":

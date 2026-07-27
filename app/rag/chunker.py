@@ -88,6 +88,9 @@ _INTERVAL_NUMERIC_RE = re.compile(
     re.I,
 )
 
+# Matches "approx. every 7 years", "every 7-year", "7 years", etc.
+_INTERVAL_YEAR_RE = re.compile(r'(\d+)\s*[-–]?\s*years?', re.I)
+
 # Lines that start with a checkbox / bullet indicator
 _CHECKBOX_LINE_RE = re.compile(
     r'^[ \t]*(?:[□☐☑✓✔○●]'
@@ -102,8 +105,18 @@ def _detect_interval(text: str) -> Optional[int]:
     for keyword, hours in _INTERVAL_KEYWORD_MAP:
         if keyword in low:
             return hours
+    # "approx. every 7 years" / "7-year" / "7 years" → 7 * 6000 = 42000h
+    m_yr = _INTERVAL_YEAR_RE.search(text)
+    if m_yr:
+        return int(m_yr.group(1)) * 6000
     m = _INTERVAL_NUMERIC_RE.search(text)
-    return int(m.group(1)) if m else None
+    if m:
+        try:
+            # Strip thousands separators: "45,000" → 45000, "4.000" (German) → 4000
+            return int(m.group(1).replace(',', '').replace('.', ''))
+        except (ValueError, AttributeError):
+            return None
+    return None
 
 
 def _is_heading(line: str, min_len: int = 4, max_len: int = 120) -> bool:

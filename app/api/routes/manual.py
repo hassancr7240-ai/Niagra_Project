@@ -738,7 +738,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
-    # Save citations then run internal validation
+    # Save citations — one record per retrieved chunk so UI shows page/section links.
+    # Accept page_start=0: pdfplumber sometimes cannot determine page number but the
+    # text excerpt is still valid evidence the content exists in the document.
     citation_records = [
         {
             "manual_id": manual_id,
@@ -749,22 +751,60 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             "content_type": c.get("content_type", "procedure"),
             "text_excerpt": c.get("text", "")[:500],
             "manual_version": c.get("manual_version", ""),
+            "manufacturer": classification.manufacturer or "",
+            "machine_model": classification.model or "",
         }
         for c in top_chunks
-        if c.get("page_start", 0) > 0
+        if c.get("text", "").strip()  # include any chunk that has content
     ]
+
+    # When AI returned 0 tasks and fallback ran, build citations from PDF pages
+    # that contain PM content — gives engineers page references even without AI chunks
+    if not citation_records and extracted_tasks:
+        import pdfplumber as _plumber
+        _PM_KW = ("maintenance", "inspect", "replace", "check", "lubricate",
+                  "interval", "hours", "service", "clean", "grease")
+        try:
+            with _plumber.open(str(pdf_path)) as _pdf:
+                for _page in _pdf.pages:
+                    _txt = _page.extract_text() or ""
+                    if any(kw in _txt.lower() for kw in _PM_KW):
+                        citation_records.append({
+                            "manual_id": manual_id,
+                            "chunk_id": f"fallback_p{_page.page_number}",
+                            "page_start": _page.page_number,
+                            "page_end": _page.page_number,
+                            "section": "",
+                            "content_type": "procedure",
+                            "text_excerpt": _txt[:500],
+                            "manual_version": "",
+                            "manufacturer": classification.manufacturer or "",
+                            "machine_model": classification.model or "",
+                        })
+                        if len(citation_records) >= 25:
+                            break
+        except Exception as _pe:
+            log.warning("[%s] Fallback citation scan failed: %s", manual_id, _pe)
+
     if citation_records:
         import sqlite3 as _sqlite3
-        import json as _json
         try:
             conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
+            # Ensure new columns exist (safe no-op if already present)
+            for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT")):
+                try:
+                    conn.execute(f"ALTER TABLE citations ADD COLUMN {_col} {_typ}")
+                except Exception:
+                    pass
             conn.executemany(
                 "INSERT OR IGNORE INTO citations "
-                "(citation_id, manual_id, chunk_id, page_start, page_end, section, content_type, text_excerpt, manual_version) "
-                "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?)",
+                "(citation_id, manual_id, chunk_id, page_start, page_end, section, "
+                "content_type, text_excerpt, manual_version, manufacturer, machine_model) "
+                "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?)",
                 [
                     (r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
-                     r["section"], r["content_type"], r["text_excerpt"], r["manual_version"])
+                     r["section"], r["content_type"], r["text_excerpt"], r["manual_version"],
+                     r.get("manufacturer", ""), r.get("machine_model", ""))
                     for r in citation_records
                 ],
             )

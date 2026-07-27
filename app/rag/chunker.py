@@ -84,7 +84,7 @@ _INTERVAL_KEYWORD_MAP: list[tuple[str, int]] = [
 ]
 
 _INTERVAL_NUMERIC_RE = re.compile(
-    r'(\d{1,6})\s*(?:hours?|hrs?|h\b|betriebsstunden|stunden)',
+    r'(\d{1,6}[,.]?\d{0,3})\s*(?:operating\s+)?(?:hours?|hrs?|h\b|betriebsstunden|stunden)',
     re.I,
 )
 
@@ -147,6 +147,10 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
         page_text_lower = (page.extract_text() or '').lower()
         if not any(kw in page_text_lower for kw in _TABLE_SCAN_KW):
             continue
+        # Capture interval from page text — Krones format puts interval in the
+        # heading ABOVE the table ("Interval: Every 120 Operating Hours"), not inside cells
+        page_interval = _detect_interval(page_text_lower)
+
         for table in (page.extract_tables() or []):
             if not table or len(table) < 2:
                 continue
@@ -176,7 +180,8 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
                     continue
 
                 row_text = ' | '.join(f'{h}: {v}' for h, v in row_data.items())
-                interval = _detect_interval(row_text)
+                # Use interval from row text first, fall back to page-level interval
+                interval = _detect_interval(row_text) or page_interval
 
                 chunks.append(TextChunk(
                     chunk_id=f'{source_file}__tbl_p{pn}_{idx:04d}',

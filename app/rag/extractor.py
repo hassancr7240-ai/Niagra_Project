@@ -56,8 +56,9 @@ async def extract_tasks_from_chunks(
     interval_hints: Optional[list[int]] = None,
 ) -> list[dict]:
     """Use LLM to extract structured PM tasks from retrieved manual chunks."""
-    # granite3.3:2b has ~4096 token context — cap chunks and chars aggressively
-    combined_text = "\n\n---\n\n".join(c["text"][:600] for c in chunks[:6])
+    # Send more chunks so AI sees enough maintenance content across all intervals
+    # granite3.3:8b handles ~8192 tokens — 15 chunks x 500 chars fits comfortably
+    combined_text = "\n\n---\n\n".join(c["text"][:500] for c in chunks[:15])
 
     if settings.ai_provider == "watsonx":
         return await _extract_watsonx(combined_text, manufacturer, model, interval_hints)

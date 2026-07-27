@@ -701,8 +701,9 @@ def _try_generic_table(pdf, pdf_path: Path) -> list[dict]:
 # ── Strategy 3: text-pattern fallback ────────────────────────────────────────
 
 _TEXT_INTERVAL_RE = re.compile(
-    r"(?:every|alle|each|after|nach)\s+(\d{2,6})\s*(?:hours?|hours|hrs?|h\b|"
-    r"betriebsstunden|stunden)\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
+    r"(?:every|alle|each|after|nach)\s+(\d{1,6}[,.]?\d{0,3})\s*"
+    r"(?:operating\s+)?(?:hours?|hrs?|h\b|betriebsstunden|stunden)"
+    r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
     re.IGNORECASE,
 )
 _BULLET_RE = re.compile(

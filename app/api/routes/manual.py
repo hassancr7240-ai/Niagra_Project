@@ -598,14 +598,21 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
         except Exception as e:
             log.warning("raw_update failed (%s): %s", status, e)
 
-    def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str) -> None:
+    def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "") -> None:
         """Write final pipeline results via raw sqlite3."""
         try:
             conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
-                "UPDATE manual_uploads SET status='PENDING_REVIEW', extracted_tasks=?, detected_manufacturer=?, detected_chapters=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
-                (extracted_tasks_json, manufacturer, chapters_json, manual_id),
+                """UPDATE manual_uploads
+                   SET status='PENDING_REVIEW',
+                       extracted_tasks=?,
+                       detected_manufacturer=?,
+                       detected_chapters=?,
+                       machine_id=COALESCE(NULLIF(machine_id,''), NULLIF(?,''), machine_id),
+                       updated_at=CURRENT_TIMESTAMP
+                   WHERE manual_id=?""",
+                (extracted_tasks_json, manufacturer, chapters_json, inferred_machine_id, manual_id),
             )
             conn.close()
         except Exception as e:
@@ -625,10 +632,31 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
             pass
 
 
+def _infer_machine_id(manufacturer: str, model: Optional[str]) -> str:
+    """Map classification result to a known machine_id for CON L3 ZIP generation."""
+    mfr = (manufacturer or "").upper()
+    mod = (model or "").upper()
+    if "EISBAR" in mfr or "DEHUMID" in mfr:
+        return "DEHUMIDIFIER-L3"
+    if "TETRA" in mfr:
+        return "TETRAPAK-ASEPTIC-L3"
+    if any(k in mfr for k in ("KRONES", "VARIOPAC", "CONTIFORM", "SHRINK")):
+        if "SHRINK" in mod:
+            return "SHRINK-TUNNEL-L3"
+        if "VARIOPAC" in mod:
+            return "VARIOPAC-PRO-L3"
+        if "CONTIFORM" in mod:
+            return "CONTIFORM-C3-L3"
+        return "VARIOPAC-PRO-L3"  # KRONES default
+    if "SIG" in mfr or "COMBIBLOC" in mfr:
+        return ""
+    return ""
+
+
 async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finalize_fn) -> None:
     """
     Runs the full RAG pipeline calling update_fn(status) for progress updates
-    and finalize_fn(tasks_json, manufacturer, chapters_json) when complete.
+    and finalize_fn(tasks_json, manufacturer, chapters_json, machine_id) when complete.
     Avoids any ORM session for status writes — only uses raw sqlite3 via callbacks.
     """
     import json
@@ -678,6 +706,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         classification = _keyword_classify(sample_text)
 
     log.info("[%s] Classified: %s %s", manual_id, classification.manufacturer, classification.model)
+
+    inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model)
+    log.info("[%s] Inferred machine_id: %s", manual_id, inferred_machine_id or "none")
 
     # Update to CHUNKING — user sees the pipeline advance while the thread finishes
     update_fn("CHUNKING")
@@ -827,4 +858,5 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         json.dumps(extracted_tasks),
         classification.manufacturer,
         json.dumps(classification.detected_chapters),
+        inferred_machine_id,
     )

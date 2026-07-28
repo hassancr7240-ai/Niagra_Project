@@ -25,6 +25,7 @@ class ClassificationResult:
 _KRONES_KEYWORDS = [
     "krones", "contiform", "variopac", "linajet", "modulfill",
     "pressant", "innoket", "linaglide", "lineaglide", "monotec",
+    "shrinking tunnel", "shrink tunnel", "krones ag",
 ]
 _EISBAR_KEYWORDS = ["eisbär", "eisbar", "das-e", "das e", "trockentechnik", "dehumidifier das"]
 _MAINTENANCE_KEYWORDS = [
@@ -62,11 +63,18 @@ async def classify_manual(pdf_path: Path, sample_text: str) -> ClassificationRes
 def _keyword_classify(text: str) -> ClassificationResult:
     text_lower = text.lower()
 
-    # Krones
+    # Krones — any single distinctive keyword is enough
     krones_matches = sum(1 for kw in _KRONES_KEYWORDS if kw in text_lower)
-    if krones_matches >= 2:
+    if krones_matches >= 1:
         model = _detect_krones_model(text_lower)
-        chapters = [12] if "contiform" in text_lower else [11, 12, 13] if "variopac" in text_lower else [12]
+        if "contiform" in text_lower:
+            chapters = [12]
+        elif "variopac" in text_lower:
+            chapters = [11, 12, 13]
+        elif "shrink" in text_lower:
+            chapters = [9]
+        else:
+            chapters = [9, 12]
         return ClassificationResult(
             manufacturer="KRONES",
             model=model,
@@ -128,6 +136,8 @@ def _detect_krones_model(text_lower: str) -> Optional[str]:
         "contiform": "Contiform",
         "variopac pro": "Variopac Pro FS",
         "variopac": "Variopac",
+        "shrinking tunnel": "Shrink Tunnel",
+        "shrink tunnel": "Shrink Tunnel",
     }
     for kw, model in models.items():
         if kw in text_lower:

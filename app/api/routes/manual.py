@@ -724,7 +724,26 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     from app.rag.pipeline import (
         _retrieve_8_pass_local, _select_top_chunks_by_type,
         _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
+        _extract_pmrspl_direct,
     )
+
+    # Tetra Pak PMRSPL direct path — bypasses AI; structured table has all data
+    is_tetra = any(k in (classification.manufacturer or "").upper() for k in ("TETRA", "TEM"))
+    if is_tetra:
+        log.info("[%s] Tetra Pak detected — running PMRSPL direct extractor", manual_id)
+        extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
+        if extracted_tasks:
+            log.info("[%s] PMRSPL direct: %d tasks", manual_id, len(extracted_tasks))
+            for i, t in enumerate(extracted_tasks, 1):
+                t["task_no"] = i * 10
+            finalize_fn(
+                json.dumps(extracted_tasks),
+                classification.manufacturer,
+                json.dumps(classification.detected_chapters or []),
+                inferred_machine_id,
+            )
+            return
+        log.warning("[%s] PMRSPL direct returned 0 tasks — falling through to AI path", manual_id)
 
     # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs)
     chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})

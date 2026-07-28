@@ -138,7 +138,7 @@ _TABLE_SCAN_KW = frozenset({
     'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
     'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
 })
-_TABLE_PAGE_CAP = 150   # never scan more than this many pages for tables
+_TABLE_PAGE_CAP = 300   # scan up to 300 pages — Variopac Pro maintenance starts at p213
 
 
 def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:
@@ -171,6 +171,48 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
             if max_cols < 2:
                 continue
 
+            # ── Krones / 2-column key-value table detection ──────────────────
+            # Format: col-0 = label ("Component", "Work", "Aids", etc.)
+            #         col-1 = value
+            # Merge ALL rows into a single record chunk instead of one-row-per-chunk.
+            _KV_LABELS = {'component', 'location', 'work', 'aids', 'tools',
+                          'interval', 'remark', 'remarks', 'note', 'notes',
+                          'action', 'activity', 'task', 'description'}
+            col0_vals = [str(r[0] or '').strip().lower() for r in table if r and r[0]]
+            is_kv = (
+                max_cols == 2
+                and len(col0_vals) >= 2
+                and sum(1 for v in col0_vals if v in _KV_LABELS) >= 2
+            )
+            if is_kv:
+                kv: dict[str, str] = {}
+                for row in table:
+                    if not row or len(row) < 2:
+                        continue
+                    k = str(row[0] or '').strip().lower()
+                    v = str(row[1] or '').strip()
+                    if k and v:
+                        kv[k] = v
+                if kv:
+                    row_text = ' | '.join(f'{k}: {v}' for k, v in kv.items())
+                    interval = _detect_interval(row_text) or page_interval
+                    chunks.append(TextChunk(
+                        chunk_id=f'{source_file}__tbl_p{pn}_{idx:04d}',
+                        text=f'[TABLE ROW] {row_text}',
+                        page_start=pn, page_end=pn,
+                        char_start=0, char_end=len(row_text),
+                        source_file=source_file,
+                        chunk_type='table_row',
+                        interval_hint=interval,
+                        table_data=kv,
+                        content_type='table',
+                        manual_id=manual_id,
+                        manual_version=manual_version,
+                    ))
+                    idx += 1
+                continue
+            # ─────────────────────────────────────────────────────────────────
+
             # Detect header row (first row with ≥ 2 non-empty cells)
             raw_headers: list[str] = []
             data_start = 0
@@ -184,6 +226,28 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
                 raw_headers = [f'col_{i}' for i in range(max_cols)]
                 data_start = 0
 
+            # ── PMRSPL interval column detection ─────────────────────────────
+            # Tetra Pak PMRSPL format: one column is a raw number like 6000/18000
+            # followed by a "Change"/"Check" column — no "h" suffix so regex misses it.
+            _PMRSPL_INTERVALS = {3000, 6000, 12000, 18000, 1500, 500, 1000, 4000, 45000, 42000}
+            _PMRSPL_ACTIONS = {'change', 'check', 'replace', 'inspect', 'clean'}
+            pmrspl_interval_col: Optional[int] = None
+            if table and len(table) > 1:
+                for ri, row in enumerate(table[:3]):
+                    cells_r = [str(c or '').strip() for c in (row or [])]
+                    for ci, cell in enumerate(cells_r[:-1]):
+                        try:
+                            v = int(cell)
+                            nxt = cells_r[ci + 1].lower().strip() if ci + 1 < len(cells_r) else ''
+                            if v in _PMRSPL_INTERVALS and any(a in nxt for a in _PMRSPL_ACTIONS):
+                                pmrspl_interval_col = ci
+                                break
+                        except (ValueError, TypeError):
+                            pass
+                    if pmrspl_interval_col is not None:
+                        break
+            # ─────────────────────────────────────────────────────────────────
+
             for row in table[data_start:]:
                 if not row or all(not c or str(c).strip() == '' for c in row):
                     continue
@@ -193,8 +257,17 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
                     continue
 
                 row_text = ' | '.join(f'{h}: {v}' for h, v in row_data.items())
-                # Use interval from row text first, fall back to page-level interval
-                interval = _detect_interval(row_text) or page_interval
+                # PMRSPL: extract interval from known column first
+                pmrspl_iv: Optional[int] = None
+                if pmrspl_interval_col is not None and pmrspl_interval_col < len(cells):
+                    try:
+                        pmrspl_iv = int(cells[pmrspl_interval_col])
+                        if pmrspl_iv not in _PMRSPL_INTERVALS:
+                            pmrspl_iv = None
+                    except (ValueError, TypeError):
+                        pmrspl_iv = None
+                # Use interval from row text first, fall back to PMRSPL col, then page-level
+                interval = _detect_interval(row_text) or pmrspl_iv or page_interval
 
                 chunks.append(TextChunk(
                     chunk_id=f'{source_file}__tbl_p{pn}_{idx:04d}',

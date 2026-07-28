@@ -421,11 +421,138 @@ _GENERIC_WORDS = frozenset({
 })
 
 
+def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
+    """
+    Direct extractor for Tetra Pak PMRSPL format.
+
+    The PMRSPL table has no column headers that match _INTERVAL_HEADERS —
+    interval is a raw number (3000/6000/12000/18000) at a fixed column index,
+    followed by an action ("Change"/"Check").  We detect the interval column
+    positionally from data rows and map component types to area names.
+    """
+    import pdfplumber
+
+    _COMP_AREA: dict[str, str] = {
+        "filter": "FILTERS",
+        "silencer": "SILENCERS",
+        "non-return valve": "VALVES",
+        "check valve": "VALVES",
+        "seat valve": "VALVES",
+        "single seat valve": "VALVES",
+        "double seat valve": "VALVES",
+        "butterfly valve": "VALVES",
+        "diaphragm valve": "VALVES",
+        "angle seat valve": "VALVES",
+        "regulating valve": "VALVES",
+        "control valve": "VALVES",
+        "pressure reducing valve": "VALVES",
+        "aseptic valve": "VALVES",
+        "aseptic regulating valve": "VALVES",
+        "top unit": "TOP UNIT",
+        "thinktop": "TOP UNIT",
+        "level switch": "SWITCHES",
+        "level limit switch": "SWITCHES",
+        "pressure switch": "SWITCHES",
+        "flow switch": "SWITCHES",
+        "temperature switch": "SWITCHES",
+        "temperature transmitter": "SENSORS",
+        "pressure transmitter": "SENSORS",
+        "sensor cable": "SENSORS",
+        "pressure gauge": "PRESSURE GAUGE",
+        "pressure indicator": "PRESSURE GAUGE",
+    }
+    _PMRSPL_VALID = {3000, 6000, 12000, 18000}
+    _PMRSPL_CHANGE_KEYWORDS = {"change", "replace"}
+
+    tasks: list[dict] = []
+    seen: set[tuple] = set()  # (label, interval) dedup
+
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page in pdf.pages[:150]:
+                txt = (page.extract_text() or "").lower()
+                if "preventive maintenance recommendations" not in txt:
+                    continue
+                for table in (page.extract_tables() or []):
+                    if not table or len(table) < 2:
+                        continue
+                    # Detect interval column: find column where value in _PMRSPL_VALID
+                    # and adjacent column contains "change"/"check"
+                    iv_col: int = -1
+                    action_col: int = -1
+                    for row in table[:5]:
+                        cells = [str(c or "").strip() for c in row]
+                        for ci, cell in enumerate(cells[:-1]):
+                            try:
+                                v = int(cell)
+                                nxt = cells[ci + 1].lower()
+                                if v in _PMRSPL_VALID and any(a in nxt for a in {"change", "check", "inspect"}):
+                                    iv_col = ci
+                                    action_col = ci + 1
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+                        if iv_col >= 0:
+                            break
+                    if iv_col < 0:
+                        continue
+                    # Component type is typically 2 columns before interval
+                    comp_col = max(0, iv_col - 4)  # column 4 in 15-col PMRSPL table
+
+                    for row in table:
+                        if not row or len(row) <= action_col:
+                            continue
+                        cells = [str(c or "").strip() for c in row]
+                        # Must have an interval value
+                        try:
+                            interval = int(cells[iv_col])
+                        except (ValueError, TypeError):
+                            continue
+                        if interval not in _PMRSPL_VALID:
+                            continue
+                        # Only include "Change" rows (spare part replacement)
+                        action_val = cells[action_col].lower()
+                        if not any(kw in action_val for kw in _PMRSPL_CHANGE_KEYWORDS):
+                            continue
+                        # Label (tag number) — use as dedup key
+                        label = cells[1] if len(cells) > 1 else ""
+                        key = (label, interval)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        # Resolve area from component type
+                        comp_raw = cells[comp_col].lower() if comp_col < len(cells) else ""
+                        area = "VALVES"
+                        for kw, mapped in _COMP_AREA.items():
+                            if kw in comp_raw:
+                                area = mapped
+                                break
+                        desc_parts = [p for p in cells[1:iv_col] if p and len(p) > 2]
+                        description = " ".join(desc_parts[:3]).upper()[:200] or f"REPLACE {area} SPARE PARTS"
+                        tasks.append({
+                            "task_no": (len(tasks) + 1) * 10,
+                            "area": area,
+                            "action": "REPLACE",
+                            "description": f"CHANGE SPARE PARTS: {description}"[:200],
+                            "machine_state": "STOPPED",
+                            "safety_flag": False,
+                            "part_number": cells[iv_col + 2] if iv_col + 2 < len(cells) else None,
+                            "interval_hours": interval,
+                            "validation_status": "VERIFIED",
+                        })
+    except Exception as exc:
+        logger.error("PMRSPL direct extraction failed for %s: %s", pdf_path.name, exc)
+
+    logger.info("PMRSPL direct: %d tasks from %s", len(tasks), pdf_path.name)
+    return tasks
+
+
 def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
     """
     Generalized fallback extractor: parse PM tables from any PDF format.
 
     Strategy (tried in order):
+      0. PMRSPL direct — Tetra Pak PMRSPL positional column format
       1. PMRSPL/Tetra Pak style — header-row column detection
       2. Generic interval table — any table with a numeric interval column
          and an action/description column

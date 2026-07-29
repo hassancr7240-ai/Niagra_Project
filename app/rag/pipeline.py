@@ -425,10 +425,12 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
     """
     Direct extractor for Tetra Pak PMRSPL format.
 
-    The PMRSPL table has no column headers that match _INTERVAL_HEADERS —
-    interval is a raw number (3000/6000/12000/18000) at a fixed column index,
-    followed by an action ("Change"/"Check").  We detect the interval column
-    positionally from data rows and map component types to area names.
+    Finds the PMRSPL section start (page with "preventive maintenance recommendations"),
+    then scans that page AND all consecutive following pages for tables with the same
+    column structure — because the header text only appears on the FIRST page of the
+    multi-page table (pages 111-117 in the 806-page Tetra Pak PDF).
+
+    Includes both Change (→ REPLACE) and Check (→ CHECK) rows to match reference output.
     """
     import pdfplumber
 
@@ -462,84 +464,117 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
         "pressure indicator": "PRESSURE GAUGE",
     }
     _PMRSPL_VALID = {3000, 6000, 12000, 18000}
-    _PMRSPL_CHANGE_KEYWORDS = {"change", "replace"}
+    _ACTION_MAP = {"change": "REPLACE", "replace": "REPLACE", "check": "CHECK",
+                   "inspect": "CHECK", "clean": "CHECK", "adjust": "CHECK"}
 
     tasks: list[dict] = []
-    seen: set[tuple] = set()  # (label, interval) dedup
+    seen: set[tuple] = set()  # (label, interval, action) dedup
+
+    def _detect_iv_col(table: list) -> tuple[int, int]:
+        """Return (iv_col, action_col) or (-1, -1) if not a PMRSPL table."""
+        for row in table[:8]:
+            cells = [str(c or "").strip() for c in row]
+            for ci, cell in enumerate(cells[:-1]):
+                try:
+                    v = int(cell)
+                    nxt = cells[ci + 1].lower()
+                    if v in _PMRSPL_VALID and any(a in nxt for a in _ACTION_MAP):
+                        return ci, ci + 1
+                except (ValueError, TypeError):
+                    pass
+        return -1, -1
+
+    def _process_table(table: list, iv_col: int, action_col: int) -> None:
+        comp_col = max(0, iv_col - 4)
+        for row in table:
+            if not row or len(row) <= action_col:
+                continue
+            cells = [str(c or "").strip() for c in row]
+            try:
+                interval = int(cells[iv_col])
+            except (ValueError, TypeError):
+                continue
+            if interval not in _PMRSPL_VALID:
+                continue
+            action_raw = cells[action_col].lower().strip()
+            action = next((v for k, v in _ACTION_MAP.items() if k in action_raw), None)
+            if not action:
+                continue
+            label = cells[1] if len(cells) > 1 else ""
+            key = (label, interval, action)
+            if key in seen:
+                continue
+            seen.add(key)
+            comp_raw = cells[comp_col].lower() if comp_col < len(cells) else ""
+            area = "GENERAL"
+            for kw, mapped in _COMP_AREA.items():
+                if kw in comp_raw:
+                    area = mapped
+                    break
+            desc_parts = [p for p in cells[1:iv_col] if p and len(p) > 2]
+            description = " ".join(desc_parts[:3]).upper()[:200] or f"{action} {area} COMPONENTS"
+            part_no = cells[iv_col + 2] if iv_col + 2 < len(cells) else None
+            tasks.append({
+                "task_no": (len(tasks) + 1) * 10,
+                "area": area,
+                "action": action,
+                "description": description[:200],
+                "machine_state": "STOPPED",
+                "safety_flag": False,
+                "part_number": part_no or None,
+                "interval_hours": interval,
+                "validation_status": "VERIFIED",
+            })
 
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
+            pmrspl_start = -1
+            # Phase 1: find the first page of the PMRSPL section
             for page in pdf.pages[:150]:
                 txt = (page.extract_text() or "").lower()
-                if "preventive maintenance recommendations" not in txt:
-                    continue
-                for table in (page.extract_tables() or []):
-                    if not table or len(table) < 2:
-                        continue
-                    # Detect interval column: find column where value in _PMRSPL_VALID
-                    # and adjacent column contains "change"/"check"
-                    iv_col: int = -1
-                    action_col: int = -1
-                    for row in table[:5]:
-                        cells = [str(c or "").strip() for c in row]
-                        for ci, cell in enumerate(cells[:-1]):
-                            try:
-                                v = int(cell)
-                                nxt = cells[ci + 1].lower()
-                                if v in _PMRSPL_VALID and any(a in nxt for a in {"change", "check", "inspect"}):
-                                    iv_col = ci
-                                    action_col = ci + 1
-                                    break
-                            except (ValueError, TypeError):
-                                pass
-                        if iv_col >= 0:
-                            break
-                    if iv_col < 0:
-                        continue
-                    # Component type is typically 2 columns before interval
-                    comp_col = max(0, iv_col - 4)  # column 4 in 15-col PMRSPL table
+                if "preventive maintenance recommendations" in txt:
+                    pmrspl_start = page.page_number - 1  # 0-based index
+                    break
 
-                    for row in table:
-                        if not row or len(row) <= action_col:
+            if pmrspl_start < 0:
+                logger.warning("PMRSPL: section header not found in first 150 pages of %s", pdf_path.name)
+            else:
+                logger.info("PMRSPL: section starts at page %d (0-based idx %d)",
+                            pmrspl_start + 1, pmrspl_start)
+                # Phase 2: scan from start page through up to 30 consecutive pages
+                # The table header text only appears on the first page — subsequent
+                # continuation pages have identical column structure but no header.
+                known_iv_col = -1
+                known_action_col = -1
+                consecutive_empty = 0
+
+                for page in pdf.pages[pmrspl_start: pmrspl_start + 30]:
+                    tables = page.extract_tables() or []
+                    found_pmrspl_table = False
+                    for table in tables:
+                        if not table or len(table) < 2:
                             continue
-                        cells = [str(c or "").strip() for c in row]
-                        # Must have an interval value
-                        try:
-                            interval = int(cells[iv_col])
-                        except (ValueError, TypeError):
-                            continue
-                        if interval not in _PMRSPL_VALID:
-                            continue
-                        # Only include "Change" rows (spare part replacement)
-                        action_val = cells[action_col].lower()
-                        if not any(kw in action_val for kw in _PMRSPL_CHANGE_KEYWORDS):
-                            continue
-                        # Label (tag number) — use as dedup key
-                        label = cells[1] if len(cells) > 1 else ""
-                        key = (label, interval)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        # Resolve area from component type
-                        comp_raw = cells[comp_col].lower() if comp_col < len(cells) else ""
-                        area = "VALVES"
-                        for kw, mapped in _COMP_AREA.items():
-                            if kw in comp_raw:
-                                area = mapped
-                                break
-                        desc_parts = [p for p in cells[1:iv_col] if p and len(p) > 2]
-                        description = " ".join(desc_parts[:3]).upper()[:200] or f"REPLACE {area} SPARE PARTS"
-                        tasks.append({
-                            "task_no": (len(tasks) + 1) * 10,
-                            "area": area,
-                            "action": "REPLACE",
-                            "description": f"CHANGE SPARE PARTS: {description}"[:200],
-                            "machine_state": "STOPPED",
-                            "safety_flag": False,
-                            "part_number": cells[iv_col + 2] if iv_col + 2 < len(cells) else None,
-                            "interval_hours": interval,
-                            "validation_status": "VERIFIED",
-                        })
+                        # Try to (re-)detect column positions from this table
+                        iv_col, action_col = _detect_iv_col(table)
+                        if iv_col >= 0:
+                            known_iv_col = iv_col
+                            known_action_col = action_col
+                        # Use last-known positions as fallback for continuation pages
+                        if known_iv_col >= 0:
+                            before = len(tasks)
+                            _process_table(table, known_iv_col, known_action_col)
+                            if len(tasks) > before:
+                                found_pmrspl_table = True
+
+                    if not found_pmrspl_table:
+                        consecutive_empty += 1
+                        if consecutive_empty >= 3:
+                            logger.info("PMRSPL: 3 consecutive non-PMRSPL pages — stopping at page %d",
+                                        page.page_number)
+                            break
+                    else:
+                        consecutive_empty = 0
+
     except Exception as exc:
         logger.error("PMRSPL direct extraction failed for %s: %s", pdf_path.name, exc)
 

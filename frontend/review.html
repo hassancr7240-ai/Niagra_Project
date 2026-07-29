@@ -732,9 +732,14 @@ function buildIntervalTabs(tasks) {
   const allCount = tasks.length;
 
   const label = h => {
-    const map = {8:'8hr / Daily',120:'120hr / ~2wk',250:'250hr',500:'500hr / Monthly',
-      1000:'1000hr',1500:'1500hr / Quarterly',2000:'2000hr',3000:'3000hr / 6-Month',
-      4000:'4000hr',6000:'6000hr / Annual',42000:'42000hr / 7yr'};
+    const map = {
+      8:'8hr / Daily', 120:'120hr / ~2wk', 250:'250hr',
+      500:'500hr / Monthly', 1000:'1000hr / 2-Month',
+      1500:'1500hr / Quarterly', 2000:'2000hr', 3000:'3000hr / 6-Month',
+      4000:'4000hr / 6-Month', 6000:'6000hr / Annual',
+      12000:'12000hr / 2-Year', 18000:'18000hr / 3-Year',
+      30000:'30000hr / 5-Year', 42000:'42000hr / 7yr', 45000:'45000hr / 7.5yr',
+    };
     return map[h] || `${h}hr`;
   };
 
@@ -788,13 +793,14 @@ function renderTable(tasks) {
     const safety = t.safety_flag;
     const vStatus = t.validation_status || 'UNVERIFIED';
 
-    // Match citation to task by content_type derived from action
+    // Match citation: prefer matching pass type, then any procedure citation
     const actionCtypeMap = {LOCKOUT:'loto',VERIFY:'loto',INSPECT:'procedure',
       CHECK:'procedure',CLEAN:'procedure',REPLACE:'parts_list',
       LUBRICATE:'procedure',TEST:'procedure',CONFIRM:'procedure',LISTEN:'procedure'};
     const preferredType = actionCtypeMap[(t.action||'').toUpperCase()] || 'procedure';
-    const cite = allCitations.find(c=>c.content_type===preferredType)
-              || allCitations.find(c=>c.content_type==='procedure')
+    const cite = allCitations.find(c=>c.content_type===preferredType && c.page_start)
+              || allCitations.find(c=>c.content_type==='procedure' && c.page_start)
+              || allCitations.find(c=>c.page_start)
               || allCitations[0];
     const pageStr = cite && cite.page_start
       ? (cite.page_end && cite.page_end !== cite.page_start
@@ -908,10 +914,13 @@ function renderCitations(citations) {
     const jsonData = {
       manual_id: c.manual_id,
       manual_version: c.manual_version || null,
+      manufacturer: c.manufacturer || null,
+      machine_model: c.machine_model || null,
       page_start: c.page_start,
       page_end: c.page_end,
       section: c.section || null,
       content_type: c.content_type,
+      text: c.text_excerpt ? c.text_excerpt.substring(0, 300) : null,
     };
     const jsonHtml = syntaxHighlight(JSON.stringify(jsonData, null, 2));
 

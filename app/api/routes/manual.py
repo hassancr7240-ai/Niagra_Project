@@ -457,6 +457,8 @@ async def get_citations(
             "content_type": c.content_type,
             "text_excerpt": c.text_excerpt,
             "manual_version": c.manual_version,
+            "manufacturer": getattr(c, "manufacturer", None),
+            "machine_model": getattr(c, "machine_model", None),
         }
         for c in citations
     ]

@@ -553,24 +553,39 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
             pmrspl_start = -1
-            # Phase 1: find the first page of the PMRSPL section
+            known_iv_col = -1
+            known_action_col = -1
+
+            # Phase 1: find the page that BOTH mentions the section AND has a valid PMRSPL table.
+            # The Table of Contents (page 1) also mentions "preventive maintenance recommendations"
+            # as a chapter title — we must skip TOC pages and find the actual content page (~p111).
             for page in pdf.pages[:150]:
                 txt = (page.extract_text() or "").lower()
-                if "preventive maintenance recommendations" in txt:
-                    pmrspl_start = page.page_number - 1  # 0-based index
+                if "preventive maintenance recommendations" not in txt:
+                    continue
+                # Verify this page has a qualifying PMRSPL table, not just a TOC entry
+                for table in (page.extract_tables() or []):
+                    iv_col, action_col = _is_pmrspl_table(table)
+                    if iv_col >= 0:
+                        pmrspl_start = page.page_number - 1  # 0-based index
+                        known_iv_col = iv_col
+                        known_action_col = action_col
+                        # Process this first page immediately
+                        _process_table(table, iv_col, action_col)
+                        break
+                if pmrspl_start >= 0:
                     break
 
             if pmrspl_start < 0:
-                logger.warning("PMRSPL: section header not found in first 150 pages of %s", pdf_path.name)
+                logger.warning("PMRSPL: qualifying section not found in first 150 pages of %s", pdf_path.name)
             else:
-                logger.info("PMRSPL: section starts at page %d", pmrspl_start + 1)
-                # Phase 2: scan at most 10 pages from section start.
-                # PMRSPL is ~7 pages (111-117). Hard cap prevents runaway into other sections.
-                known_iv_col = -1
-                known_action_col = -1
+                logger.info("PMRSPL: section starts at page %d (%d tasks so far)",
+                            pmrspl_start + 1, len(tasks))
+                # Phase 2: scan the NEXT pages after the start (start page already processed above).
+                # PMRSPL is ~7 pages (111-117). Hard cap of 10 pages prevents runaway.
                 consecutive_empty = 0
 
-                for page in pdf.pages[pmrspl_start: pmrspl_start + 10]:
+                for page in pdf.pages[pmrspl_start + 1: pmrspl_start + 10]:
                     tables = page.extract_tables() or []
                     found_pmrspl_table = False
                     for table in tables:

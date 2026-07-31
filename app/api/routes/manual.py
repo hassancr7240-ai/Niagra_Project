@@ -738,6 +738,59 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             log.info("[%s] PMRSPL direct: %d tasks", manual_id, len(extracted_tasks))
             for i, t in enumerate(extracted_tasks, 1):
                 t["task_no"] = i * 10
+
+            # Save PMRSPL page citations so the review UI shows source references
+            import sqlite3 as _sqlite3
+            import pdfplumber as _plumber
+            _pmrspl_citations = []
+            try:
+                with _plumber.open(str(pdf_path)) as _pdf:
+                    for _page in _pdf.pages:
+                        _txt = _page.extract_text() or ""
+                        _txt_lower = _txt.lower()
+                        # Cite pages that have PMRSPL content keywords
+                        if any(kw in _txt_lower for kw in
+                               ("preventive maintenance", "change", "check", "interval")):
+                            _pmrspl_citations.append({
+                                "manual_id": manual_id,
+                                "chunk_id": f"pmrspl_p{_page.page_number}",
+                                "page_start": _page.page_number,
+                                "page_end": _page.page_number,
+                                "section": "Preventive Maintenance Recommendations",
+                                "content_type": "procedure",
+                                "text_excerpt": _txt[:500],
+                                "manual_version": "",
+                                "manufacturer": classification.manufacturer or "",
+                                "machine_model": classification.model or "",
+                            })
+                        if len(_pmrspl_citations) >= 20:
+                            break
+            except Exception as _ce:
+                log.warning("[%s] PMRSPL citation scan failed: %s", manual_id, _ce)
+
+            if _pmrspl_citations:
+                try:
+                    _conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
+                    for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT")):
+                        try:
+                            _conn.execute(f"ALTER TABLE citations ADD COLUMN {_col} {_typ}")
+                        except Exception:
+                            pass
+                    _conn.executemany(
+                        "INSERT OR IGNORE INTO citations "
+                        "(citation_id, manual_id, chunk_id, page_start, page_end, section, "
+                        "content_type, text_excerpt, manual_version, manufacturer, machine_model) "
+                        "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?)",
+                        [(r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
+                          r["section"], r["content_type"], r["text_excerpt"],
+                          r["manual_version"], r["manufacturer"], r["machine_model"])
+                         for r in _pmrspl_citations],
+                    )
+                    _conn.close()
+                    log.info("[%s] Saved %d PMRSPL citations", manual_id, len(_pmrspl_citations))
+                except Exception as _ce:
+                    log.warning("[%s] PMRSPL citation DB write failed: %s", manual_id, _ce)
+
             finalize_fn(
                 json.dumps(extracted_tasks),
                 classification.manufacturer,

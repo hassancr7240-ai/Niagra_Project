@@ -743,39 +743,27 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             for i, t in enumerate(extracted_tasks, 1):
                 t["task_no"] = i * 10
 
-            # Save PMRSPL page citations — scan only the PMRSPL section pages
-            # (same logic as _extract_pmrspl_direct: find header page, scan next 10)
+            # Save one citation per task — each pointing to the exact PMRSPL page
+            # where that task's row was extracted. chunk_id is unique per task so
+            # the review UI can show a per-task citation with a clickable page number.
             import sqlite3 as _sqlite3
-            import pdfplumber as _plumber
-            from app.rag.pipeline import _extract_pmrspl_direct as _pmrspl_fn
-            _pmrspl_citations = []
-            try:
-                with _plumber.open(str(pdf_path)) as _pdf:
-                    _pmrspl_page_start = -1
-                    for _p in _pdf.pages[:150]:
-                        _t = (_p.extract_text() or "").lower()
-                        if "preventive maintenance recommendations" in _t and len(_p.extract_tables() or []) > 0:
-                            _pmrspl_page_start = _p.page_number
-                            break
-                    if _pmrspl_page_start < 0:
-                        _pmrspl_page_start = 1  # fallback: cite from start of doc
-                    for _p in _pdf.pages[_pmrspl_page_start - 1: _pmrspl_page_start + 9]:
-                        _txt = _p.extract_text() or ""
-                        _pmrspl_citations.append({
-                            "manual_id": manual_id,
-                            "chunk_id": f"pmrspl_p{_p.page_number}",
-                            "page_start": _p.page_number,
-                            "page_end": _p.page_number,
-                            "section": "Preventive Maintenance Recommendations",
-                            "content_type": "procedure",
-                            "text_excerpt": _txt[:500],
-                            "manual_version": "",
-                            "manufacturer": classification.manufacturer or "",
-                            "machine_model": classification.model or "",
-                        })
-            except Exception as _ce:
-                log.warning("[%s] PMRSPL citation scan failed: %s", manual_id, _ce)
-
+            _pmrspl_citations = [
+                {
+                    "manual_id": manual_id,
+                    "chunk_id": f"pmrspl_task_{t['task_no']}",
+                    "page_start": t.get("page_start", 0),
+                    "page_end": t.get("page_end", t.get("page_start", 0)),
+                    "section": "Preventive Maintenance Recommendations",
+                    "content_type": "procedure",
+                    # raw_text is the joined PMRSPL row cells (ID | desc | model | interval | action | spare part)
+                    "text_excerpt": t.get("raw_text", t.get("description", ""))[:500],
+                    "manual_version": "",
+                    "manufacturer": classification.manufacturer or "",
+                    "machine_model": classification.model or "",
+                }
+                for t in extracted_tasks
+                if t.get("page_start", 0) > 0  # skip tasks without a known page
+            ]
             if _pmrspl_citations:
                 try:
                     _conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
@@ -795,7 +783,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                          for r in _pmrspl_citations],
                     )
                     _conn.close()
-                    log.info("[%s] Saved %d PMRSPL citations", manual_id, len(_pmrspl_citations))
+                    log.info("[%s] Saved %d per-task PMRSPL citations", manual_id, len(_pmrspl_citations))
                 except Exception as _ce:
                     log.warning("[%s] PMRSPL citation DB write failed: %s", manual_id, _ce)
 

@@ -511,7 +511,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
             return best[0]
         return -1, -1
 
-    def _process_table(table: list, iv_col: int, action_col: int) -> None:
+    def _process_table(table: list, iv_col: int, action_col: int, page_no: int = 0) -> None:
         comp_col = max(0, iv_col - 4)
         for row in table:
             if not row or len(row) <= action_col:
@@ -552,6 +552,8 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
             comp_display = cells[comp_col].upper() if comp_col < len(cells) else ""
             description = f"{comp_display} — {label}".strip(" —")[:200] or f"{action} {area}"
             part_no = cells[iv_col + 2].strip() if iv_col + 2 < len(cells) else None
+            # Raw row text for the citation text excerpt
+            raw_text = " | ".join(c for c in cells if c and c != "None")[:500]
             seen[key] = len(tasks)  # record index before appending
             tasks.append({
                 "task_no": (len(tasks) + 1) * 10,
@@ -563,6 +565,10 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 "part_number": part_no or None,
                 "interval_hours": interval,
                 "validation_status": "VERIFIED",
+                # Page reference — enables per-task citations in the review UI
+                "page_start": page_no,
+                "page_end": page_no,
+                "raw_text": raw_text,
             })
 
     try:
@@ -586,7 +592,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                         known_iv_col = iv_col
                         known_action_col = action_col
                         # Process this first page immediately
-                        _process_table(table, iv_col, action_col)
+                        _process_table(table, iv_col, action_col, page.page_number)
                         break
                 if pmrspl_start >= 0:
                     break
@@ -611,13 +617,13 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                             known_iv_col = iv_col
                             known_action_col = action_col
                             before = len(tasks)
-                            _process_table(table, known_iv_col, known_action_col)
+                            _process_table(table, known_iv_col, known_action_col, page.page_number)
                             if len(tasks) > before:
                                 found_pmrspl_table = True
                         elif known_iv_col >= 0:
                             # Continuation page: try processing with last-known columns
                             before = len(tasks)
-                            _process_table(table, known_iv_col, known_action_col)
+                            _process_table(table, known_iv_col, known_action_col, page.page_number)
                             if len(tasks) > before:
                                 found_pmrspl_table = True
 

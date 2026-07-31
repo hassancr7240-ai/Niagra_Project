@@ -44,6 +44,25 @@ async def lifespan(app: FastAPI):
     await create_tables()
     logger.info("Database tables ready")
 
+    # Step 3b: Apply incremental column migrations (safe no-op if columns already exist)
+    import sqlite3 as _sqlite3
+    from pathlib import Path as _Path
+    _db_path = str(_Path(__file__).parent.parent / "data" / "pm_automation.db")
+    try:
+        _mc = _sqlite3.connect(_db_path, isolation_level=None)
+        for _tbl, _col, _typ in [
+            ("citations", "manufacturer", "TEXT"),
+            ("citations", "machine_model", "TEXT"),
+        ]:
+            try:
+                _mc.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_typ}")
+                logger.info("Migration: added column %s.%s", _tbl, _col)
+            except Exception:
+                pass  # column already exists
+        _mc.close()
+    except Exception as _me:
+        logger.warning("Column migration failed: %s", _me)
+
     # Step 4: Seed PM Library from JSON if database is empty
     from app.db.database import get_db_session
     from app.core.pm_library import seed_from_json

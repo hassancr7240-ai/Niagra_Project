@@ -739,32 +739,36 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             for i, t in enumerate(extracted_tasks, 1):
                 t["task_no"] = i * 10
 
-            # Save PMRSPL page citations so the review UI shows source references
+            # Save PMRSPL page citations — scan only the PMRSPL section pages
+            # (same logic as _extract_pmrspl_direct: find header page, scan next 10)
             import sqlite3 as _sqlite3
             import pdfplumber as _plumber
+            from app.rag.pipeline import _extract_pmrspl_direct as _pmrspl_fn
             _pmrspl_citations = []
             try:
                 with _plumber.open(str(pdf_path)) as _pdf:
-                    for _page in _pdf.pages:
-                        _txt = _page.extract_text() or ""
-                        _txt_lower = _txt.lower()
-                        # Cite pages that have PMRSPL content keywords
-                        if any(kw in _txt_lower for kw in
-                               ("preventive maintenance", "change", "check", "interval")):
-                            _pmrspl_citations.append({
-                                "manual_id": manual_id,
-                                "chunk_id": f"pmrspl_p{_page.page_number}",
-                                "page_start": _page.page_number,
-                                "page_end": _page.page_number,
-                                "section": "Preventive Maintenance Recommendations",
-                                "content_type": "procedure",
-                                "text_excerpt": _txt[:500],
-                                "manual_version": "",
-                                "manufacturer": classification.manufacturer or "",
-                                "machine_model": classification.model or "",
-                            })
-                        if len(_pmrspl_citations) >= 20:
+                    _pmrspl_page_start = -1
+                    for _p in _pdf.pages[:150]:
+                        _t = (_p.extract_text() or "").lower()
+                        if "preventive maintenance recommendations" in _t and len(_p.extract_tables() or []) > 0:
+                            _pmrspl_page_start = _p.page_number
                             break
+                    if _pmrspl_page_start < 0:
+                        _pmrspl_page_start = 1  # fallback: cite from start of doc
+                    for _p in _pdf.pages[_pmrspl_page_start - 1: _pmrspl_page_start + 9]:
+                        _txt = _p.extract_text() or ""
+                        _pmrspl_citations.append({
+                            "manual_id": manual_id,
+                            "chunk_id": f"pmrspl_p{_p.page_number}",
+                            "page_start": _p.page_number,
+                            "page_end": _p.page_number,
+                            "section": "Preventive Maintenance Recommendations",
+                            "content_type": "procedure",
+                            "text_excerpt": _txt[:500],
+                            "manual_version": "",
+                            "manufacturer": classification.manufacturer or "",
+                            "machine_model": classification.model or "",
+                        })
             except Exception as _ce:
                 log.warning("[%s] PMRSPL citation scan failed: %s", manual_id, _ce)
 

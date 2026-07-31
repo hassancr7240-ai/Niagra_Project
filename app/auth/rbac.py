@@ -50,6 +50,7 @@ _PERMISSIONS: dict[str, set[str]] = {
         "dashboard:read",
         "audit:read",
         "manual:upload",
+        "manual:approve",
         "hours:write",
     },
     Role.ENGINEER: {

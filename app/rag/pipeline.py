@@ -470,59 +470,58 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
     tasks: list[dict] = []
     seen: set[tuple] = set()  # (label, interval, action) dedup
 
-    # Exact action words only — the PMRSPL action column contains ONLY these single words
-    _EXACT_ACTIONS = {"change", "check", "replace", "inspect"}
+    _ACTION_KEYWORDS = {"change", "check", "replace", "inspect"}
 
     def _is_pmrspl_table(table: list) -> tuple[int, int]:
         """
-        Return (iv_col, action_col) only when the table looks genuinely like the PMRSPL.
-        Guards: table ≥ 10 columns, action cell is a short exact-match word (not a sentence),
-        and at least 3 data rows satisfy the pattern before we accept the result.
+        Return (iv_col, action_col) only when the table looks like the PMRSPL.
+        Guards: ≥ 10 columns (PMRSPL has 15), interval in _PMRSPL_VALID,
+        action cell CONTAINS one of the action keywords (substring, not exact —
+        pdfplumber may add whitespace/newlines to cells), ≥ 2 rows matching.
         """
         if not table:
             return -1, -1
         max_cols = max((len(r) for r in table if r), default=0)
-        if max_cols < 10:  # PMRSPL has 15 columns — non-PMRSPL tables are usually narrower
+        if max_cols < 10:
             return -1, -1
 
-        candidates: dict[tuple[int, int], int] = {}  # (iv_col, action_col) → hit count
+        candidates: dict[tuple[int, int], int] = {}
         for row in table:
             cells = [str(c or "").strip() for c in row]
             for ci, cell in enumerate(cells[:-1]):
                 try:
-                    v = int(cell)
+                    v = int(cell.replace(",", "").replace(".", ""))
                     if v not in _PMRSPL_VALID:
                         continue
                     nxt = cells[ci + 1].strip().lower()
-                    # Action must be a SHORT standalone word, not a sentence fragment
-                    if nxt in _EXACT_ACTIONS:
+                    # substring match — handles "Change " / "Check\n" / "CHANGE"
+                    if any(a in nxt for a in _ACTION_KEYWORDS) and len(nxt) < 30:
                         key = (ci, ci + 1)
                         candidates[key] = candidates.get(key, 0) + 1
                 except (ValueError, TypeError):
                     pass
 
-        # Accept only if ≥3 rows consistently use the same column pair
         best = max(candidates.items(), key=lambda x: x[1], default=((-1, -1), 0))
-        if best[1] >= 3:
+        if best[1] >= 2:
             return best[0]
         return -1, -1
 
     def _process_table(table: list, iv_col: int, action_col: int) -> None:
-        comp_col = max(0, iv_col - 4)  # component type is 4 cols before interval in PMRSPL
+        comp_col = max(0, iv_col - 4)
         for row in table:
             if not row or len(row) <= action_col:
                 continue
             cells = [str(c or "").strip() for c in row]
             try:
-                interval = int(cells[iv_col])
+                interval = int(cells[iv_col].replace(",", "").replace(".", ""))
             except (ValueError, TypeError):
                 continue
             if interval not in _PMRSPL_VALID:
                 continue
             action_raw = cells[action_col].strip().lower()
-            if action_raw not in _EXACT_ACTIONS:
+            if not any(a in action_raw for a in _ACTION_KEYWORDS):
                 continue
-            action = "REPLACE" if action_raw in {"change", "replace"} else "CHECK"
+            action = "REPLACE" if any(a in action_raw for a in {"change", "replace"}) else "CHECK"
             label = cells[1] if len(cells) > 1 else ""
             key = (label, interval, action)
             if key in seen:

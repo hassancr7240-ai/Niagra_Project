@@ -730,7 +730,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     from app.rag.pipeline import (
         _retrieve_8_pass_local, _select_top_chunks_by_type,
         _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
-        _extract_pmrspl_direct,
+        _extract_pmrspl_direct, _assign_task_page_citations,
     )
 
     # Tetra Pak PMRSPL direct path — bypasses AI; structured table has all data
@@ -840,29 +840,21 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
-    # Save citations — one record per retrieved chunk so UI shows page/section links.
-    # Accept page_start=0: pdfplumber sometimes cannot determine page number but the
-    # text excerpt is still valid evidence the content exists in the document.
-    citation_records = [
-        {
-            "manual_id": manual_id,
-            "chunk_id": c.get("chunk_id", ""),
-            "page_start": c.get("page_start", 0),
-            "page_end": c.get("page_end", 0),
-            "section": c.get("section", ""),
-            "content_type": c.get("content_type", "procedure"),
-            "text_excerpt": c.get("text", "")[:500],
-            "manual_version": c.get("manual_version", ""),
-            "manufacturer": classification.manufacturer or "",
-            "machine_model": classification.model or "",
-        }
-        for c in top_chunks
-        if c.get("text", "").strip()  # include any chunk that has content
-    ]
+    # Per-task citations: each extracted task gets one citation pointing to its
+    # best-matching source chunk (scored by interval_hours match + keyword overlap).
+    # page_start/page_end are also written back onto each task dict so the review
+    # UI can show the source page in the task table.
+    citation_records = _assign_task_page_citations(
+        extracted_tasks,
+        top_chunks,
+        manual_id,
+        classification.manufacturer or "",
+        classification.model or "",
+    )
 
-    # When AI returned 0 tasks and fallback ran, build citations from PDF pages
-    # that contain PM content — gives engineers page references even without AI chunks
-    if not citation_records and extracted_tasks:
+    # Fallback: when AI returned 0 tasks, scan PDF pages for PM content so engineers
+    # at least have page evidence that the document contains PM information.
+    if not citation_records:
         import pdfplumber as _plumber
         _PM_KW = ("maintenance", "inspect", "replace", "check", "lubricate",
                   "interval", "hours", "service", "clean", "grease")

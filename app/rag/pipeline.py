@@ -392,6 +392,68 @@ def _validate_task_citations(tasks: list[dict], citation_records: list[dict]) ->
     return validated
 
 
+def _assign_task_page_citations(
+    tasks: list[dict],
+    top_chunks: list[dict],
+    manual_id: str,
+    manufacturer: str,
+    machine_model: str,
+) -> list[dict]:
+    """
+    Creates one citation per extracted task by finding the best-matching source chunk.
+
+    Matching score: +10 for chunk containing the task's interval_hours as a string,
+    +1 per keyword (>3 chars) from description/area that appears in chunk text.
+    Also sets page_start/page_end on each task dict in-place so the review UI
+    can show the source page in the task table.
+    """
+    citations = []
+    for task in tasks:
+        interval_str = str(task.get("interval_hours", ""))
+        desc = (task.get("description", "") or "").lower()
+        area = (task.get("area", "") or "").lower()
+        keywords = {w for w in (desc + " " + area).split() if len(w) > 3}
+
+        best_chunk: dict | None = None
+        best_score = -1
+
+        for chunk in top_chunks:
+            chunk_text = (chunk.get("text", "") or "").lower()
+            score = 0
+            if interval_str and interval_str in chunk_text:
+                score += 10
+            score += sum(1 for kw in keywords if kw in chunk_text)
+            if score > best_score:
+                best_score = score
+                best_chunk = chunk
+
+        if best_chunk:
+            task["page_start"] = best_chunk.get("page_start", 0)
+            task["page_end"] = best_chunk.get("page_end", 0) or task["page_start"]
+            section = best_chunk.get("section", "")
+            text_excerpt = best_chunk.get("text", "")[:500]
+        else:
+            task.setdefault("page_start", 0)
+            task.setdefault("page_end", 0)
+            section = ""
+            text_excerpt = task.get("description", "")[:500]
+
+        citations.append({
+            "manual_id": manual_id,
+            "chunk_id": f"task_{task.get('task_no', len(citations) + 1)}",
+            "page_start": task.get("page_start", 0),
+            "page_end": task.get("page_end", 0),
+            "section": section,
+            "content_type": "procedure",
+            "text_excerpt": text_excerpt,
+            "manual_version": "",
+            "manufacturer": manufacturer or "",
+            "machine_model": machine_model or "",
+        })
+
+    return citations
+
+
 def _to_chunk_dicts(embedded: list[dict]) -> list[dict]:
     return [{"text": e["text"], "page_start": e.get("page_start", 0),
              "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}

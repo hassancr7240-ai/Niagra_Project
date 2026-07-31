@@ -470,22 +470,45 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
     tasks: list[dict] = []
     seen: set[tuple] = set()  # (label, interval, action) dedup
 
-    def _detect_iv_col(table: list) -> tuple[int, int]:
-        """Return (iv_col, action_col) or (-1, -1) if not a PMRSPL table."""
-        for row in table[:8]:
+    # Exact action words only — the PMRSPL action column contains ONLY these single words
+    _EXACT_ACTIONS = {"change", "check", "replace", "inspect"}
+
+    def _is_pmrspl_table(table: list) -> tuple[int, int]:
+        """
+        Return (iv_col, action_col) only when the table looks genuinely like the PMRSPL.
+        Guards: table ≥ 10 columns, action cell is a short exact-match word (not a sentence),
+        and at least 3 data rows satisfy the pattern before we accept the result.
+        """
+        if not table:
+            return -1, -1
+        max_cols = max((len(r) for r in table if r), default=0)
+        if max_cols < 10:  # PMRSPL has 15 columns — non-PMRSPL tables are usually narrower
+            return -1, -1
+
+        candidates: dict[tuple[int, int], int] = {}  # (iv_col, action_col) → hit count
+        for row in table:
             cells = [str(c or "").strip() for c in row]
             for ci, cell in enumerate(cells[:-1]):
                 try:
                     v = int(cell)
-                    nxt = cells[ci + 1].lower()
-                    if v in _PMRSPL_VALID and any(a in nxt for a in _ACTION_MAP):
-                        return ci, ci + 1
+                    if v not in _PMRSPL_VALID:
+                        continue
+                    nxt = cells[ci + 1].strip().lower()
+                    # Action must be a SHORT standalone word, not a sentence fragment
+                    if nxt in _EXACT_ACTIONS:
+                        key = (ci, ci + 1)
+                        candidates[key] = candidates.get(key, 0) + 1
                 except (ValueError, TypeError):
                     pass
+
+        # Accept only if ≥3 rows consistently use the same column pair
+        best = max(candidates.items(), key=lambda x: x[1], default=((-1, -1), 0))
+        if best[1] >= 3:
+            return best[0]
         return -1, -1
 
     def _process_table(table: list, iv_col: int, action_col: int) -> None:
-        comp_col = max(0, iv_col - 4)
+        comp_col = max(0, iv_col - 4)  # component type is 4 cols before interval in PMRSPL
         for row in table:
             if not row or len(row) <= action_col:
                 continue
@@ -496,10 +519,10 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 continue
             if interval not in _PMRSPL_VALID:
                 continue
-            action_raw = cells[action_col].lower().strip()
-            action = next((v for k, v in _ACTION_MAP.items() if k in action_raw), None)
-            if not action:
+            action_raw = cells[action_col].strip().lower()
+            if action_raw not in _EXACT_ACTIONS:
                 continue
+            action = "REPLACE" if action_raw in {"change", "replace"} else "CHECK"
             label = cells[1] if len(cells) > 1 else ""
             key = (label, interval, action)
             if key in seen:
@@ -511,9 +534,10 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 if kw in comp_raw:
                     area = mapped
                     break
-            desc_parts = [p for p in cells[1:iv_col] if p and len(p) > 2]
-            description = " ".join(desc_parts[:3]).upper()[:200] or f"{action} {area} COMPONENTS"
-            part_no = cells[iv_col + 2] if iv_col + 2 < len(cells) else None
+            # Use component type + label as description (clean, short)
+            comp_display = cells[comp_col].upper() if comp_col < len(cells) else ""
+            description = f"{comp_display} — {label}".strip(" —")[:200] or f"{action} {area}"
+            part_no = cells[iv_col + 2].strip() if iv_col + 2 < len(cells) else None
             tasks.append({
                 "task_no": (len(tasks) + 1) * 10,
                 "area": area,
@@ -539,28 +563,29 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
             if pmrspl_start < 0:
                 logger.warning("PMRSPL: section header not found in first 150 pages of %s", pdf_path.name)
             else:
-                logger.info("PMRSPL: section starts at page %d (0-based idx %d)",
-                            pmrspl_start + 1, pmrspl_start)
-                # Phase 2: scan from start page through up to 30 consecutive pages
-                # The table header text only appears on the first page — subsequent
-                # continuation pages have identical column structure but no header.
+                logger.info("PMRSPL: section starts at page %d", pmrspl_start + 1)
+                # Phase 2: scan at most 10 pages from section start.
+                # PMRSPL is ~7 pages (111-117). Hard cap prevents runaway into other sections.
                 known_iv_col = -1
                 known_action_col = -1
                 consecutive_empty = 0
 
-                for page in pdf.pages[pmrspl_start: pmrspl_start + 30]:
+                for page in pdf.pages[pmrspl_start: pmrspl_start + 10]:
                     tables = page.extract_tables() or []
                     found_pmrspl_table = False
                     for table in tables:
                         if not table or len(table) < 2:
                             continue
-                        # Try to (re-)detect column positions from this table
-                        iv_col, action_col = _detect_iv_col(table)
+                        iv_col, action_col = _is_pmrspl_table(table)
                         if iv_col >= 0:
                             known_iv_col = iv_col
                             known_action_col = action_col
-                        # Use last-known positions as fallback for continuation pages
-                        if known_iv_col >= 0:
+                            before = len(tasks)
+                            _process_table(table, known_iv_col, known_action_col)
+                            if len(tasks) > before:
+                                found_pmrspl_table = True
+                        elif known_iv_col >= 0:
+                            # Continuation page: try processing with last-known columns
                             before = len(tasks)
                             _process_table(table, known_iv_col, known_action_col)
                             if len(tasks) > before:
@@ -568,8 +593,8 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
 
                     if not found_pmrspl_table:
                         consecutive_empty += 1
-                        if consecutive_empty >= 3:
-                            logger.info("PMRSPL: 3 consecutive non-PMRSPL pages — stopping at page %d",
+                        if consecutive_empty >= 2:
+                            logger.info("PMRSPL: 2 consecutive non-PMRSPL pages — stopping at page %d",
                                         page.page_number)
                             break
                     else:

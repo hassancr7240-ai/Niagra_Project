@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI):
         for _tbl, _col, _typ in [
             ("citations", "manufacturer", "TEXT"),
             ("citations", "machine_model", "TEXT"),
+            ("citations", "interval_hours", "INTEGER DEFAULT 0"),
         ]:
             try:
                 _mc.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_typ}")

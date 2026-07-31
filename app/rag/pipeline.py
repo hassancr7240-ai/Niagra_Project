@@ -449,6 +449,7 @@ def _assign_task_page_citations(
             "manual_version": "",
             "manufacturer": manufacturer or "",
             "machine_model": machine_model or "",
+            "interval_hours": task.get("interval_hours", 0),
         })
 
     return citations

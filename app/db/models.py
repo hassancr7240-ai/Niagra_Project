@@ -251,6 +251,7 @@ class Citation(Base):
     manual_version: Mapped[Optional[str]] = mapped_column(String(64))
     manufacturer: Mapped[Optional[str]] = mapped_column(String(128))
     machine_model: Mapped[Optional[str]] = mapped_column(String(128))
+    interval_hours: Mapped[Optional[int]] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

@@ -553,6 +553,10 @@ let selectedTaskRow = null;
 let drawerOpen = true;
 let uploadData = null;
 
+// Build a lookup: chunk_id → citation, and task_no → citation (for per-task page badges)
+let citeByChunkId = {};
+let citeByTaskNo = {};
+
 /* ─── Auth ────────────────────────────────────────────────────────────── */
 async function freshToken() {
   let t = localStorage.getItem('pm_token');
@@ -640,6 +644,15 @@ async function loadAll() {
     uploadData = upload;
     allTasks = upload.extracted_tasks || [];
     allCitations = citations || [];
+    // Build fast lookups for per-task page badges
+    citeByChunkId = {};
+    citeByTaskNo = {};
+    allCitations.forEach(c => {
+      if (c.chunk_id) citeByChunkId[c.chunk_id] = c;
+      // chunk_id patterns: "pmrspl_task_30" or "task_30"
+      const m = c.chunk_id && c.chunk_id.match(/task_(\d+)$/);
+      if (m) citeByTaskNo[parseInt(m[1], 10)] = c;
+    });
 
     renderStrip(upload);
     renderStatusChip(upload.status);
@@ -654,7 +667,7 @@ async function loadAll() {
     } else {
       renderTable(allTasks);
     }
-    if (!window._autoInterval) renderCitations(allCitations);
+    if (!window._autoInterval) renderCitations(_activeCitations());
 
     // Show machine — read-only if machine_id is set, fallback dropdown only if truly missing
     const nameEl = document.getElementById('machineNameDisplay');
@@ -693,7 +706,7 @@ function renderStrip(d) {
   const intervals  = [...new Set(allTasks.map(t=>t.interval_hours).filter(Boolean))];
 
   document.getElementById('topMfr').textContent = `Review: ${mfr}`;
-  document.getElementById('topSub').textContent = `${cnt} tasks · ${intervals.length} PM intervals · ${allCitations.length} citations`;
+  document.getElementById('topSub').textContent = `${cnt} tasks · ${intervals.length} PM intervals · ${allCitations.length} citations`; // count updated by selectTab
 
   document.getElementById('infoStrip').innerHTML = [
     `<div class="strip-item"><span class="strip-label">Manufacturer</span><span class="strip-val">${mfr}</span></div>`,
@@ -758,6 +771,7 @@ function buildIntervalTabs(tasks) {
 
 function selectTab(iv, btn) {
   currentInterval = iv;
+  currentCiteType = 'all';
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   const filtered = iv === 'all' ? allTasks : allTasks.filter(t => t.interval_hours === iv);
@@ -766,7 +780,24 @@ function selectTab(iv, btn) {
     iv === 'all' ? `All Tasks (${filtered.length})` : `${label} — ${filtered.length} tasks`;
   renderTable(filtered);
   selectedTaskRow = null;
-  renderCitations(allCitations);
+  // Filter citation panel to match the active interval (or all when on "All Tasks")
+  const ivCitations = _activeCitations();
+  buildCiteTypeFilters(ivCitations);
+  renderCitations(ivCitations);
+  // Update header citation count to show how many citations exist for this interval
+  const topSub = document.getElementById('topSub');
+  if (topSub) {
+    const ivCount = iv === 'all' ? allCitations.length : ivCitations.filter(c=>c.interval_hours===iv).length;
+    const totalIntervals = [...new Set(allTasks.map(t=>t.interval_hours).filter(Boolean))].length;
+    topSub.textContent = `${allTasks.length} tasks · ${totalIntervals} PM intervals · ${ivCount} citations${iv !== 'all' ? ' for this interval' : ''}`;
+  }
+}
+
+// Returns the citations relevant to the current interval tab
+function _activeCitations() {
+  return currentInterval === 'all'
+    ? allCitations
+    : allCitations.filter(c => c.interval_hours === currentInterval || c.interval_hours === 0);
 }
 
 /* ─── Table rendering ─────────────────────────────────────────────────── */
@@ -793,15 +824,11 @@ function renderTable(tasks) {
     const safety = t.safety_flag;
     const vStatus = t.validation_status || 'UNVERIFIED';
 
-    // Match citation: prefer matching pass type, then any procedure citation
-    const actionCtypeMap = {LOCKOUT:'loto',VERIFY:'loto',INSPECT:'procedure',
-      CHECK:'procedure',CLEAN:'procedure',REPLACE:'parts_list',
-      LUBRICATE:'procedure',TEST:'procedure',CONFIRM:'procedure',LISTEN:'procedure'};
-    const preferredType = actionCtypeMap[(t.action||'').toUpperCase()] || 'procedure';
-    const cite = allCitations.find(c=>c.content_type===preferredType && c.page_start)
-              || allCitations.find(c=>c.content_type==='procedure' && c.page_start)
-              || allCitations.find(c=>c.page_start)
-              || allCitations[0];
+    // Per-task citation: look up by task_no first, fall back to any citation with a page
+    const cite = citeByTaskNo[t.task_no]
+              || citeByChunkId[`pmrspl_task_${t.task_no}`]
+              || citeByChunkId[`task_${t.task_no}`]
+              || null;
     const pageStr = cite && cite.page_start
       ? (cite.page_end && cite.page_end !== cite.page_start
           ? `${cite.page_start}–${cite.page_end}`
@@ -838,9 +865,8 @@ function selectRow(idx, tr) {
   document.querySelectorAll('#taskTbody tr').forEach(r => r.classList.remove('selected'));
   tr.classList.add('selected');
   selectedTaskRow = idx;
-  // Open drawer if closed
   if (!drawerOpen) toggleDrawer();
-  renderCitations(allCitations);
+  renderCitations(_activeCitations());
 }
 
 function highlightCiteByIdx(taskIdx, e) {
@@ -870,7 +896,7 @@ function filterCite(type, btn) {
   currentCiteType = type;
   document.querySelectorAll('.type-pill').forEach(p=>p.classList.remove('tp-active'));
   btn.classList.add('tp-active');
-  renderCitations(allCitations);
+  renderCitations(_activeCitations());
 }
 
 function renderCitations(citations) {

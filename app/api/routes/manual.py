@@ -459,6 +459,7 @@ async def get_citations(
             "manual_version": c.manual_version,
             "manufacturer": getattr(c, "manufacturer", None),
             "machine_model": getattr(c, "machine_model", None),
+            "interval_hours": getattr(c, "interval_hours", 0) or 0,
         }
         for c in citations
     ]
@@ -755,19 +756,20 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                     "page_end": t.get("page_end", t.get("page_start", 0)),
                     "section": "Preventive Maintenance Recommendations",
                     "content_type": "procedure",
-                    # raw_text is the joined PMRSPL row cells (ID | desc | model | interval | action | spare part)
                     "text_excerpt": t.get("raw_text", t.get("description", ""))[:500],
                     "manual_version": "",
                     "manufacturer": classification.manufacturer or "",
                     "machine_model": classification.model or "",
+                    "interval_hours": t.get("interval_hours", 0),
                 }
                 for t in extracted_tasks
-                if t.get("page_start", 0) > 0  # skip tasks without a known page
+                if t.get("page_start", 0) > 0
             ]
             if _pmrspl_citations:
                 try:
                     _conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
-                    for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT")):
+                    for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT"),
+                                       ("interval_hours", "INTEGER DEFAULT 0")):
                         try:
                             _conn.execute(f"ALTER TABLE citations ADD COLUMN {_col} {_typ}")
                         except Exception:
@@ -775,11 +777,12 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                     _conn.executemany(
                         "INSERT OR IGNORE INTO citations "
                         "(citation_id, manual_id, chunk_id, page_start, page_end, section, "
-                        "content_type, text_excerpt, manual_version, manufacturer, machine_model) "
-                        "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?)",
+                        "content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours) "
+                        "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?,?)",
                         [(r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
                           r["section"], r["content_type"], r["text_excerpt"],
-                          r["manual_version"], r["manufacturer"], r["machine_model"])
+                          r["manual_version"], r["manufacturer"], r["machine_model"],
+                          r["interval_hours"])
                          for r in _pmrspl_citations],
                     )
                     _conn.close()
@@ -884,8 +887,8 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         import sqlite3 as _sqlite3
         try:
             conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
-            # Ensure new columns exist (safe no-op if already present)
-            for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT")):
+            for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT"),
+                               ("interval_hours", "INTEGER DEFAULT 0")):
                 try:
                     conn.execute(f"ALTER TABLE citations ADD COLUMN {_col} {_typ}")
                 except Exception:
@@ -893,12 +896,13 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             conn.executemany(
                 "INSERT OR IGNORE INTO citations "
                 "(citation_id, manual_id, chunk_id, page_start, page_end, section, "
-                "content_type, text_excerpt, manual_version, manufacturer, machine_model) "
-                "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?)",
+                "content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours) "
+                "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
                      r["section"], r["content_type"], r["text_excerpt"], r["manual_version"],
-                     r.get("manufacturer", ""), r.get("machine_model", ""))
+                     r.get("manufacturer", ""), r.get("machine_model", ""),
+                     r.get("interval_hours", 0))
                     for r in citation_records
                 ],
             )

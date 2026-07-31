@@ -946,14 +946,17 @@ function renderCitations(citations) {
       page_end: c.page_end,
       section: c.section || null,
       content_type: c.content_type,
+      interval_hours: c.interval_hours || null,
       text: c.text_excerpt ? c.text_excerpt.substring(0, 300) : null,
     };
     const jsonHtml = syntaxHighlight(JSON.stringify(jsonData, null, 2));
 
+    const ivLabel = c.interval_hours ? `${c.interval_hours}hr` : '';
     return `<div class="cite-card" id="cite-${ci}">
       <div class="cite-card-head">
         <span class="page-num">📄 ${pageStr}</span>
         <span class="cite-section-name" title="${escHtml(c.section||'')}">${escHtml(c.section||'Unnamed section')}</span>
+        ${ivLabel ? `<span class="ctype-tag" style="background:#EDE9FE;color:#6D28D9;margin-right:4px">⏱ ${ivLabel}</span>` : ''}
         <span class="ctype-tag ${tClass}">${tLabel}</span>
       </div>
       <div class="cite-card-body">

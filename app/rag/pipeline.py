@@ -450,8 +450,13 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
         "pressure reducing valve": "VALVES",
         "aseptic valve": "VALVES",
         "aseptic regulating valve": "VALVES",
+        "needle valve": "VALVES",
+        "globe valve": "VALVES",
+        "ball valve": "VALVES",
         "top unit": "TOP UNIT",
         "thinktop": "TOP UNIT",
+        "proximity sensor": "SENSORS",
+        "proximity switch": "SENSORS",
         "level switch": "SWITCHES",
         "level limit switch": "SWITCHES",
         "pressure switch": "SWITCHES",
@@ -468,7 +473,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                    "inspect": "CHECK", "clean": "CHECK", "adjust": "CHECK"}
 
     tasks: list[dict] = []
-    seen: set[tuple] = set()  # (label, interval, action) dedup
+    seen: dict[tuple, int] = {}  # (label, interval) → index in tasks; one task per component-interval
 
     _ACTION_KEYWORDS = {"change", "check", "replace", "inspect"}
 
@@ -523,11 +528,21 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 continue
             action = "REPLACE" if any(a in action_raw for a in {"change", "replace"}) else "CHECK"
             label = cells[1] if len(cells) > 1 else ""
-            key = (label, interval, action)
+            # Dedup by (label, interval) — one task per component-interval pair.
+            # PMRSPL rows duplicate because each spare part is its own row AND
+            # some components have both a "Change" and a "Check" row at the same interval.
+            # When both exist, prefer REPLACE (Change) over CHECK.
+            key = (label, interval)
             if key in seen:
+                # Upgrade to REPLACE if a stronger action appears later
+                if action == "REPLACE" and tasks[seen[key]]["action"] == "CHECK":
+                    tasks[seen[key]]["action"] = "REPLACE"
                 continue
-            seen.add(key)
             comp_raw = cells[comp_col].lower() if comp_col < len(cells) else ""
+            # Skip non-equipment rows (safety signs, assembly diagrams, etc.)
+            _SKIP_COMP = {"assembly layout", "safety sign", "warning sign", "warning label"}
+            if any(sk in comp_raw for sk in _SKIP_COMP):
+                continue
             area = "GENERAL"
             for kw, mapped in _COMP_AREA.items():
                 if kw in comp_raw:
@@ -537,6 +552,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
             comp_display = cells[comp_col].upper() if comp_col < len(cells) else ""
             description = f"{comp_display} — {label}".strip(" —")[:200] or f"{action} {area}"
             part_no = cells[iv_col + 2].strip() if iv_col + 2 < len(cells) else None
+            seen[key] = len(tasks)  # record index before appending
             tasks.append({
                 "task_no": (len(tasks) + 1) * 10,
                 "area": area,

@@ -663,6 +663,10 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     """
     import json
     import logging
+    from pathlib import Path as _Path
+    # db_path must be defined here — this function is called from _run_pipeline_task
+    # which defines its own db_path, but that variable is not in scope here.
+    db_path = str(_Path(__file__).parent.parent.parent.parent / "data" / "pm_automation.db")
     from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
     from app.rag.classifier import classify_manual
     from app.rag.embedder import embed_chunks

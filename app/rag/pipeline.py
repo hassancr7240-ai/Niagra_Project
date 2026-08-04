@@ -398,6 +398,7 @@ def _assign_task_page_citations(
     manual_id: str,
     manufacturer: str,
     machine_model: str,
+    manual_version: str = "",
 ) -> list[dict]:
     """
     Creates one citation per extracted task by finding the best-matching source chunk.
@@ -446,7 +447,7 @@ def _assign_task_page_citations(
             "section": section,
             "content_type": "procedure",
             "text_excerpt": text_excerpt,
-            "manual_version": "",
+            "manual_version": manual_version or "",
             "manufacturer": manufacturer or "",
             "machine_model": machine_model or "",
             "interval_hours": task.get("interval_hours", 0),

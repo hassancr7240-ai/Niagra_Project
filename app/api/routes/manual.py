@@ -669,7 +669,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     # which defines its own db_path, but that variable is not in scope here.
     db_path = str(_Path(__file__).parent.parent.parent.parent / "data" / "pm_automation.db")
     from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
-    from app.rag.classifier import classify_manual
+    from app.rag.classifier import classify_manual, extract_manual_version
     from app.rag.embedder import embed_chunks
     from app.rag.extractor import extract_tasks_from_chunks
     from app.rag.retriever import index_chunks, retrieve_top_k
@@ -714,6 +714,11 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     log.info("[%s] Classified: %s %s", manual_id, classification.manufacturer, classification.model)
 
+    # Extract manual version from cover page text (Rev. A, Issue 3, Version 1.2, etc.)
+    manual_version = extract_manual_version(sample_text)
+    if manual_version:
+        log.info("[%s] Detected manual version: %s", manual_id, manual_version)
+
     inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model)
     log.info("[%s] Inferred machine_id: %s", manual_id, inferred_machine_id or "none")
 
@@ -757,7 +762,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                     "section": "Preventive Maintenance Recommendations",
                     "content_type": "procedure",
                     "text_excerpt": t.get("raw_text", t.get("description", ""))[:500],
-                    "manual_version": "",
+                    "manual_version": manual_version or "",
                     "manufacturer": classification.manufacturer or "",
                     "machine_model": classification.model or "",
                     "interval_hours": t.get("interval_hours", 0),
@@ -853,6 +858,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         manual_id,
         classification.manufacturer or "",
         classification.model or "",
+        manual_version or "",
     )
 
     # Fallback: when AI returned 0 tasks, scan PDF pages for PM content so engineers
@@ -874,7 +880,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                             "section": "",
                             "content_type": "procedure",
                             "text_excerpt": _txt[:500],
-                            "manual_version": "",
+                            "manual_version": manual_version or "",
                             "manufacturer": classification.manufacturer or "",
                             "machine_model": classification.model or "",
                         })

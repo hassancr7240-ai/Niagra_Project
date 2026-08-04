@@ -103,10 +103,15 @@ def _keyword_classify(text: str) -> ClassificationResult:
     # Try to detect manufacturer from title/header lines
     manufacturer = _detect_manufacturer_from_text(text_lower)
 
+    # For Tetra Pak, also try to detect the specific machine model
+    model: Optional[str] = None
+    if "TETRA" in manufacturer:
+        model = _detect_tetra_model(text_lower)
+
     chapters = _detect_maintenance_chapters(text_lower)
     return ClassificationResult(
         manufacturer=manufacturer,
-        model=None,
+        model=model,
         machine_type="THIRD_PARTY",
         confidence=confidence,
         method="keyword",
@@ -128,6 +133,52 @@ def _detect_manufacturer_from_text(text_lower: str) -> str:
         if kw in header:
             return name
     return "THIRD_PARTY"
+
+
+def _detect_tetra_model(text_lower: str) -> Optional[str]:
+    """Extract Tetra Pak machine model from PDF text."""
+    models = [
+        ("aseptic tank vd", "Aseptic Tank VD"),
+        ("aseptic tank", "Aseptic Tank"),
+        ("pasteurizer", "Pasteurizer"),
+        ("homogenizer", "Homogenizer"),
+        ("tba 22", "TBA 22"),
+        ("tba 19", "TBA 19"),
+        ("tba/22", "TBA 22"),
+        ("tba/19", "TBA 19"),
+        ("tetra brik", "Tetra Brik"),
+        ("tetra rex", "Tetra Rex"),
+        ("tetra fino", "Tetra Fino"),
+        ("tetra wedge", "Tetra Wedge"),
+        ("tetra classic", "Tetra Classic"),
+        ("tetra top", "Tetra Top"),
+        ("separator", "Separator"),
+        ("heat exchanger", "Heat Exchanger"),
+    ]
+    for kw, model in models:
+        if kw in text_lower:
+            return model
+    return None
+
+
+def extract_manual_version(text: str) -> str:
+    """
+    Scan the first 3000 chars of PDF text for revision/version patterns.
+    Looks for: Rev. A, Revision 3, Issue 2, Version 1.2, Ed. 3, etc.
+    """
+    sample = text[:3000]
+    patterns = [
+        r"rev(?:ision)?[.\s]+([A-Z0-9][\w.-]{0,10})",
+        r"issue\s+(\d+[\w.-]{0,8})",
+        r"version\s+(\d+[\w.-]{0,8})",
+        r"ed(?:ition)?[.\s]+(\d+[\w.-]{0,8})",
+        r"release\s+(\d+[\w.-]{0,8})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, sample, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
 
 
 def _detect_krones_model(text_lower: str) -> Optional[str]:

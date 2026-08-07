@@ -66,11 +66,11 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "granite-embedding:latest"
     openai_embedding_dims: int = 384              # granite-embedding output size
 
-    # IBM watsonx.ai - all production AI runs here (IBM Granite models)
-    # Task extraction  : ibm/granite-8b-code-instruct  (JSON-optimised)
-    # Classification   : ibm/granite-3-8b-instruct     (instruction-following)
-    # Analytics        : ibm/granite-3-8b-instruct
-    # Embedding        : ibm/slate-125m-english-rtrvr-v2 (1024 dims)
+    # IBM watsonx.ai - all production AI runs here
+    # Task extraction  : mistralai/mixtral-8x7b-instruct-v01 (set via WATSONX_MODEL_GENERATION)
+    # Classification   : meta-llama/llama-3-2-3b-instruct    (set via WATSONX_MODEL_CLASSIFICATION)
+    # Analytics        : mistralai/mixtral-8x7b-instruct-v01 (set via WATSONX_MODEL_ANALYTICS)
+    # Embedding        : ibm/slate-125m-english-rtrvr-v2     (1024 dims)
     watsonx_api_key: Optional[str] = None
     watsonx_project_id: Optional[str] = None
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"

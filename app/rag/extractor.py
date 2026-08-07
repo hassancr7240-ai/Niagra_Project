@@ -116,8 +116,8 @@ async def _extract_watsonx(
     interval_hints: Optional[list[int]],
 ) -> list[dict]:
     """
-    IBM watsonx.ai granite-3b-code-instruct task extraction.
-    Uses IAM token auth. Model is optimised for structured JSON output.
+    IBM watsonx.ai Mixtral 8x7B task extraction.
+    Uses IAM token auth. Model returns structured JSON output.
     """
     import httpx
     from app.rag.watsonx_auth import watsonx_headers

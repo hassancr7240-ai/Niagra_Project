@@ -251,7 +251,7 @@ Text:
 
 async def _ai_classify_watsonx(sample_text: str) -> ClassificationResult:
     """
-    IBM watsonx.ai Llama 3.2 3B classifier.
+    IBM watsonx.ai Granite 3 2B classifier.
     Data Flow Diagram: Classification Model → detect machine type.
     """
     import httpx

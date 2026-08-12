@@ -836,7 +836,7 @@ function _updatePipelineUI(data) {
       reviewCard.innerHTML = `
         <div class="card-header">
           <h3 class="card-title" style="color:var(--amber)">⚠️ Step 3 — No Tasks Extracted</h3>
-          <span class="badge badge-amber">0 tasks</span>
+          <span class="badge badge-amber">0 TASKS</span>
         </div>
         <div style="background:#FFFBEB;border:1.5px solid #FDE68A;border-radius:8px;padding:14px 16px;margin-bottom:12px">
           <div style="font-size:12.5px;font-weight:700;color:#92400E;margin-bottom:5px">
@@ -853,6 +853,12 @@ function _updatePipelineUI(data) {
         </div>`;
       return;
     }
+
+    // Show PM Library badge if tasks came from the library fallback
+    const fromLibrary = tasks.length > 0 && tasks.some(t => t._source === 'pm_library');
+    const libraryBadge = fromLibrary
+      ? `<span style="background:#EEF2FF;color:#4338CA;border:1px solid #C7D2FE;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;margin-left:8px">📚 PM Library</span>`
+      : '';
 
     // Build interval list from extracted_tasks (or fall back if tasks array not in poll data)
     const ivLabel = h => {
@@ -885,10 +891,12 @@ function _updatePipelineUI(data) {
           ${isApproved ? '✅ Step 3 — Approved' : '✅ Step 3 — Review &amp; Approve'}
         </h3>
         <span class="badge ${isApproved ? 'badge-green' : 'badge-blue'}">${taskCount} tasks</span>
+        ${libraryBadge}
       </div>
 
       <div style="font-size:11.5px;color:#475569;margin-bottom:10px">
         <strong>${mfr}</strong> — ${taskCount} tasks across <strong>${intervals.length} PM interval${intervals.length!==1?'s':''}</strong>
+        ${fromLibrary ? ' · <span style="color:#4338CA;font-weight:600">Loaded from PM Library</span>' : ''}
         ${isApproved ? ` · Approved by <strong>${data.approved_by || 'engineer'}</strong>` : ' · Select an interval to review and approve:'}
       </div>
 

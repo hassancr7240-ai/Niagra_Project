@@ -148,13 +148,59 @@ async def run_pipeline(
             interval_hints=interval_hints,
         )
 
-        # Fallback — if AI returned 0 tasks, try direct table extraction
+        # Fallback 1 — if AI returned 0 tasks, try direct table extraction
         # (handles PMRSPL-style tabular manuals like Tetra Pak)
         if not extracted_tasks:
             logger.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
             extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
             if extracted_tasks:
                 logger.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+
+        # Fallback 2 — PM Library fallback
+        # If AI + table extraction both returned 0 and we know the machine_id,
+        # load pre-validated tasks from the PM Library (tasks table).
+        # This ensures machines with seeded library data always produce output.
+        if not extracted_tasks:
+            upload_row = await crud.get_manual_upload(db, manual_id)
+            lib_machine_id = (upload_row.machine_id if upload_row else None)
+            if not lib_machine_id:
+                # Try to infer from manufacturer keyword match
+                from app.db.crud import get_machines
+                all_machines = await get_machines(db)
+                mfr_lower = (classification.manufacturer or "").lower()
+                for m in all_machines:
+                    if mfr_lower and mfr_lower in (m.name or "").lower():
+                        lib_machine_id = m.machine_id
+                        break
+            if lib_machine_id:
+                from sqlalchemy import text as sql_text
+                lib_rows = (await db.execute(
+                    sql_text(
+                        "SELECT task_no, area, action, description, machine_state, "
+                        "safety_flag, part_number, interval_hours "
+                        "FROM tasks WHERE machine_id = :mid ORDER BY interval_hours, task_no"
+                    ),
+                    {"mid": lib_machine_id},
+                )).fetchall()
+                if lib_rows:
+                    extracted_tasks = [
+                        {
+                            "task_no": r[0],
+                            "area": r[1] or "GENERAL",
+                            "action": r[2] or "CHECK",
+                            "description": r[3] or "",
+                            "machine_state": r[4] or "STOPPED",
+                            "safety_flag": bool(r[5]),
+                            "part_number": r[6],
+                            "interval_hours": r[7] or 500,
+                            "_source": "pm_library",
+                        }
+                        for r in lib_rows
+                    ]
+                    logger.info(
+                        "[%s] PM Library fallback: loaded %d tasks for machine %s",
+                        manual_id, len(extracted_tasks), lib_machine_id,
+                    )
 
         # Save citations — one record per top chunk so UI can show page/section links
         # Accept page_start=0 (pdfplumber fallback): page 0 just means page info unavailable,

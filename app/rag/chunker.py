@@ -94,7 +94,7 @@ _INTERVAL_YEAR_RE = re.compile(r'(\d+)\s*[-–]?\s*years?', re.I)
 # Lines that start with a checkbox / bullet indicator
 _CHECKBOX_LINE_RE = re.compile(
     r'^[ \t]*(?:[□☐☑✓✔○●]'
-    r'|\[\s*\]|\(\s*\)|[•\-\*])\s+(.{5,200})$',
+    r'|\[\s*\]|\(\s*\)|[•\-\*])\s+(.{5,})$',
     re.M,
 )
 

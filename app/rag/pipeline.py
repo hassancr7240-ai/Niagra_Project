@@ -318,23 +318,41 @@ def _retrieve_8_pass_local(
                 seen_ids.add(c.chunk_id)
                 selected.append(_chunk_to_dict(c))
 
+    def _has_content(c: TextChunk) -> bool:
+        """Reject table rows that only contain a section header and no task text."""
+        t = c.text.strip()
+        if not t:
+            return False
+        # pdfplumber sometimes produces table rows that are just "[TABLE ROW] col_0: <heading>"
+        # with no actual task description — these are useless for extraction.
+        if c.chunk_type == "table_row" and t.count("col_") <= 1 and len(t) < 80:
+            return False
+        return True
+
     by_content: dict[str, list[TextChunk]] = {}
     for c in chunks:
         by_content.setdefault(c.content_type, []).append(c)
 
+    def _sort_by_interval(subset: list[TextChunk]) -> list[TextChunk]:
+        """Sort so interval-matching chunks come first, then any-interval, then no-interval."""
+        def _rank(c: TextChunk) -> int:
+            if interval_hints and c.interval_hint in interval_hints:
+                return 0
+            if c.interval_hint and c.interval_hint >= 8:
+                return 1
+            return 2
+        return sorted(subset, key=_rank)
+
     for pass_name, content_type, max_n in _RETRIEVAL_PASSES:
         if content_type == "table":
-            # Pass 4 — interval tasks: table_row + checkbox chunks matching detected intervals
+            # Pass 1 — interval tasks: table_row + checkbox chunks; filter header-only rows
             interval_chunks = [
                 c for c in chunks
                 if c.chunk_type in ("table_row", "checkbox")
                 and c.chunk_id not in seen_ids
+                and _has_content(c)
             ]
-            # Prioritise chunks whose interval_hint matches what we're looking for
-            interval_chunks.sort(
-                key=lambda c: (c.interval_hint not in interval_hints if interval_hints else False,
-                               c.chunk_type != "table_row"),
-            )
+            interval_chunks = _sort_by_interval(interval_chunks)
             _add(interval_chunks, max_n)
         elif content_type == "procedure":
             # Pass 8 — coverage sweep: best remaining section/paragraph chunks
@@ -342,10 +360,13 @@ def _retrieve_8_pass_local(
                 c for c in chunks
                 if c.chunk_id not in seen_ids
                 and c.chunk_type in ("section", "paragraph", "checkbox")
+                and _has_content(c)
             ]
             _add(remaining, max_n)
         else:
-            _add(by_content.get(content_type, []), max_n)
+            # Sort non-table passes by interval match so relevant chunks beat irrelevant ones
+            subset = _sort_by_interval(by_content.get(content_type, []))
+            _add(subset, max_n)
 
         logger.debug("[8-pass] %s → %d total selected so far", pass_name, len(selected))
 

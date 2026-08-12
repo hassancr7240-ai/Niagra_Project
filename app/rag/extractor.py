@@ -65,7 +65,7 @@ async def extract_tasks_from_chunks(
         return await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
     return await _extract_ollama(combined_text, manufacturer, model, interval_hints)
 
-async def _extract_ollama(  # Ollama (local IBM Granite) via OpenAI-compatible API
+async def _extract_ollama(  # Ollama local via OpenAI-compatible API
 
     text: str,
     manufacturer: str,
@@ -80,7 +80,7 @@ async def _extract_ollama(  # Ollama (local IBM Granite) via OpenAI-compatible A
 Known intervals (hours): {interval_hints or 'detect from text'}
 
 Manual text:
-{text[:3500]}
+{text[:6000]}
 
 Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTER",...}}]"""
 
@@ -92,8 +92,7 @@ Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTE
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
-            max_tokens=2000,
-            # NOTE: response_format json_object NOT used — granite3.3:2b crashes Ollama with it
+            max_tokens=3000,
         )
         content = response.choices[0].message.content or "[]"
         # Model may return a bare array or {"tasks":[...]} wrapper

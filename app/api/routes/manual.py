@@ -848,6 +848,36 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
+    # PM Library fallback — if AI + table both returned 0, load from tasks table
+    if not extracted_tasks:
+        import sqlite3 as _sq
+        _lib_machine_id = inferred_machine_id
+        if _lib_machine_id:
+            try:
+                _conn2 = _sq.connect(db_path, timeout=30)
+                _lib_rows = _conn2.execute(
+                    "SELECT task_no, area, action, description, machine_state, "
+                    "safety_flag, part_number, interval_hours "
+                    "FROM tasks WHERE machine_id=? ORDER BY interval_hours, task_no",
+                    (_lib_machine_id,)
+                ).fetchall()
+                _conn2.close()
+                if _lib_rows:
+                    extracted_tasks = [
+                        {
+                            "task_no": r[0], "area": r[1] or "GENERAL",
+                            "action": r[2] or "CHECK", "description": r[3] or "",
+                            "machine_state": r[4] or "STOPPED", "safety_flag": bool(r[5]),
+                            "part_number": r[6], "interval_hours": r[7] or 500,
+                            "_source": "pm_library",
+                        }
+                        for r in _lib_rows
+                    ]
+                    log.info("[%s] PM Library fallback: %d tasks for %s",
+                             manual_id, len(extracted_tasks), _lib_machine_id)
+            except Exception as _le:
+                log.warning("[%s] PM Library fallback failed: %s", manual_id, _le)
+
     # Per-task citations: each extracted task gets one citation pointing to its
     # best-matching source chunk (scored by interval_hours match + keyword overlap).
     # page_start/page_end are also written back onto each task dict so the review

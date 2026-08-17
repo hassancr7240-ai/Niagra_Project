@@ -879,20 +879,22 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                     for r in _lib_rows
                 ]
                 if not extracted_tasks:
+                    # Pure fallback: AI found nothing at all
                     extracted_tasks = _lib_tasks
                     log.info("[%s] PM Library fallback (pure): %d tasks for %s",
                              manual_id, len(extracted_tasks), _lib_machine_id)
                 else:
-                    _ai_intervals = {t.get("interval_hours") for t in extracted_tasks}
-                    _supplement = [t for t in _lib_tasks if t["interval_hours"] not in _ai_intervals]
-                    if _supplement:
-                        extracted_tasks = extracted_tasks + _supplement
-                        log.info(
-                            "[%s] PM Library supplement: +%d tasks (intervals %s not in AI results) → %d total",
-                            manual_id, len(_supplement),
-                            sorted({t["interval_hours"] for t in _supplement}),
-                            len(extracted_tasks),
-                        )
+                    # Always include ALL PM Library tasks PLUS any AI tasks at
+                    # intervals the PM Library doesn't have (e.g. 42000hr, 45000hr).
+                    # Never drop PM Library tasks just because AI found a few at
+                    # the same interval — the library has the complete set.
+                    _lib_intervals = {t["interval_hours"] for t in _lib_tasks}
+                    _ai_only = [t for t in extracted_tasks if t.get("interval_hours") not in _lib_intervals]
+                    extracted_tasks = _lib_tasks + _ai_only
+                    log.info(
+                        "[%s] PM Library base (%d) + AI-only intervals (%d) → %d total",
+                        manual_id, len(_lib_tasks), len(_ai_only), len(extracted_tasks),
+                    )
         except Exception as _le:
             log.warning("[%s] PM Library load failed: %s", manual_id, _le)
 

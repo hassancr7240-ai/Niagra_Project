@@ -61,12 +61,14 @@ async def extract_tasks_from_chunks(
     (each truncated to 800 chars) so even large operating manuals get full coverage.
     Results from all batches are merged and deduplicated by description.
     """
-    BATCH_SIZE = 60
+    BATCH_SIZE = 20  # same per-call size that worked before; loop handles large PDFs
 
     all_tasks: list[dict] = []
     for batch_start in range(0, max(len(chunks), 1), BATCH_SIZE):
         batch = chunks[batch_start: batch_start + BATCH_SIZE]
-        combined_text = "\n\n---\n\n".join(c["text"][:800] for c in batch)
+        if not batch:
+            break
+        combined_text = "\n\n---\n\n".join(c["text"][:500] for c in batch)
         if settings.ai_provider == "watsonx":
             batch_tasks = await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
         else:
@@ -101,7 +103,7 @@ async def _extract_ollama(  # Ollama local via OpenAI-compatible API
 Known intervals (hours): {interval_hints or 'detect from text'}
 
 Manual text:
-{text[:40000]}
+{text[:6000]}
 
 Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTER",...}}]"""
 
@@ -113,7 +115,7 @@ Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTE
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
-            max_tokens=6000,
+            max_tokens=3000,
         )
         content = response.choices[0].message.content or "[]"
         # Model may return a bare array or {"tasks":[...]} wrapper

@@ -55,15 +55,36 @@ async def extract_tasks_from_chunks(
     model: Optional[str],
     interval_hints: Optional[list[int]] = None,
 ) -> list[dict]:
-    """Use LLM to extract structured PM tasks from retrieved manual chunks."""
-    # 20 chunks × ~200 chars avg = ~4000 chars — fits in granite3.3 context.
-    # Table pass is now first in retrieval order, so maintenance rows always occupy
-    # the first slots and are guaranteed to be within the [:20] window.
-    combined_text = "\n\n---\n\n".join(c["text"][:500] for c in chunks[:20])
+    """Use LLM to extract structured PM tasks from retrieved manual chunks.
 
-    if settings.ai_provider == "watsonx":
-        return await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
-    return await _extract_ollama(combined_text, manufacturer, model, interval_hints)
+    granite3.3:8b has a 128K context window. We batch chunks in groups of 60
+    (each truncated to 800 chars) so even large operating manuals get full coverage.
+    Results from all batches are merged and deduplicated by description.
+    """
+    BATCH_SIZE = 60
+
+    all_tasks: list[dict] = []
+    for batch_start in range(0, max(len(chunks), 1), BATCH_SIZE):
+        batch = chunks[batch_start: batch_start + BATCH_SIZE]
+        combined_text = "\n\n---\n\n".join(c["text"][:800] for c in batch)
+        if settings.ai_provider == "watsonx":
+            batch_tasks = await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
+        else:
+            batch_tasks = await _extract_ollama(combined_text, manufacturer, model, interval_hints)
+        all_tasks.extend(batch_tasks)
+        logger.info("Extraction batch %d-%d → %d tasks (running total %d)",
+                    batch_start, batch_start + len(batch), len(batch_tasks), len(all_tasks))
+
+    # Deduplicate across batches by (description prefix, interval)
+    seen: set[tuple] = set()
+    unique: list[dict] = []
+    for t in all_tasks:
+        key = (str(t.get("description", ""))[:60].upper(), t.get("interval_hours"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+
+    return unique
 
 async def _extract_ollama(  # Ollama local via OpenAI-compatible API
 
@@ -80,7 +101,7 @@ async def _extract_ollama(  # Ollama local via OpenAI-compatible API
 Known intervals (hours): {interval_hints or 'detect from text'}
 
 Manual text:
-{text[:6000]}
+{text[:40000]}
 
 Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTER",...}}]"""
 
@@ -92,7 +113,7 @@ Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTE
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
-            max_tokens=3000,
+            max_tokens=6000,
         )
         content = response.choices[0].message.content or "[]"
         # Model may return a bare array or {"tasks":[...]} wrapper

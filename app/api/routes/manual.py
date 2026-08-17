@@ -848,35 +848,61 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
-    # PM Library fallback — if AI + table both returned 0, load from tasks table
-    if not extracted_tasks:
-        import sqlite3 as _sq
-        _lib_machine_id = inferred_machine_id
-        if _lib_machine_id:
-            try:
-                _conn2 = _sq.connect(db_path, timeout=30)
-                _lib_rows = _conn2.execute(
-                    "SELECT task_no, area, action, description, machine_state, "
-                    "safety_flag, part_number, interval_hours "
-                    "FROM tasks WHERE machine_id=? ORDER BY interval_hours, task_no",
-                    (_lib_machine_id,)
-                ).fetchall()
-                _conn2.close()
-                if _lib_rows:
-                    extracted_tasks = [
-                        {
-                            "task_no": r[0], "area": r[1] or "GENERAL",
-                            "action": r[2] or "CHECK", "description": r[3] or "",
-                            "machine_state": r[4] or "STOPPED", "safety_flag": bool(r[5]),
-                            "part_number": r[6], "interval_hours": r[7] or 500,
-                            "_source": "pm_library",
-                        }
-                        for r in _lib_rows
-                    ]
-                    log.info("[%s] PM Library fallback: %d tasks for %s",
+    # Mark AI-extracted tasks with source so UI can distinguish them
+    for _t in extracted_tasks:
+        _t.setdefault("_source", "ai_extracted")
+
+    # PM Library: always load and supplement AI results with intervals AI didn't cover.
+    # Pure fallback if AI returned 0; supplement otherwise (adds 8hr daily checks,
+    # 2000hr overhaul tasks, etc. that rarely appear as checkbox items in the PDF text).
+    import sqlite3 as _sq
+    _lib_machine_id = inferred_machine_id
+    if _lib_machine_id:
+        try:
+            _conn2 = _sq.connect(db_path, timeout=30)
+            _lib_rows = _conn2.execute(
+                "SELECT task_no, area, action, description, machine_state, "
+                "safety_flag, part_number, interval_hours "
+                "FROM tasks WHERE machine_id=? ORDER BY interval_hours, task_no",
+                (_lib_machine_id,)
+            ).fetchall()
+            _conn2.close()
+            if _lib_rows:
+                _lib_tasks = [
+                    {
+                        "task_no": r[0], "area": r[1] or "GENERAL",
+                        "action": r[2] or "CHECK", "description": r[3] or "",
+                        "machine_state": r[4] or "STOPPED", "safety_flag": bool(r[5]),
+                        "part_number": r[6], "interval_hours": r[7] or 500,
+                        "_source": "pm_library",
+                    }
+                    for r in _lib_rows
+                ]
+                if not extracted_tasks:
+                    extracted_tasks = _lib_tasks
+                    log.info("[%s] PM Library fallback (pure): %d tasks for %s",
                              manual_id, len(extracted_tasks), _lib_machine_id)
-            except Exception as _le:
-                log.warning("[%s] PM Library fallback failed: %s", manual_id, _le)
+                else:
+                    _ai_intervals = {t.get("interval_hours") for t in extracted_tasks}
+                    _supplement = [t for t in _lib_tasks if t["interval_hours"] not in _ai_intervals]
+                    if _supplement:
+                        extracted_tasks = extracted_tasks + _supplement
+                        log.info(
+                            "[%s] PM Library supplement: +%d tasks (intervals %s not in AI results) → %d total",
+                            manual_id, len(_supplement),
+                            sorted({t["interval_hours"] for t in _supplement}),
+                            len(extracted_tasks),
+                        )
+        except Exception as _le:
+            log.warning("[%s] PM Library load failed: %s", manual_id, _le)
+
+    # Renumber task_no sequentially within each interval so there are no duplicates
+    # after merging AI tasks with PM Library supplement tasks.
+    _interval_counters: dict[int, int] = {}
+    for _t in extracted_tasks:
+        _iv = int(_t.get("interval_hours") or 500)
+        _interval_counters[_iv] = _interval_counters.get(_iv, 0) + 1
+        _t["task_no"] = _iv * 10 + _interval_counters[_iv]
 
     # Per-task citations: each extracted task gets one citation pointing to its
     # best-matching source chunk (scored by interval_hours match + keyword overlap).

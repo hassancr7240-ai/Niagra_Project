@@ -24,14 +24,16 @@ from app.rag.retriever import index_chunks, retrieve_top_k
 # in the selected list — the AI only reads chunks[:20] so table data must come first.
 _RETRIEVAL_PASSES: list[tuple[str, str, int]] = [
     # (pass_name, content_type_filter, max_chunks_per_pass)
-    ("interval",      "table",     15),   # FIRST — maintenance table rows are the primary PM signal
-    ("toc_schedule",  "toc",        3),
-    ("warnings",      "warning",    3),
-    ("loto",          "loto",       3),
-    ("ppe_tools",     "ppe",        3),
-    ("startup",       "startup",    3),
-    ("parts",         "parts_list", 4),
-    ("coverage",      "procedure",  8),   # final sweep — best remaining procedure chunks
+    # granite3.3:8b has 128K context — batched extraction handles up to 60 chunks per call,
+    # so raise limits here to feed it as many maintenance chunks as the PDF contains.
+    ("interval",      "table",      60),   # FIRST — all maintenance table rows / checkboxes
+    ("toc_schedule",  "toc",         5),
+    ("warnings",      "warning",     5),
+    ("loto",          "loto",        5),
+    ("ppe_tools",     "ppe",         5),
+    ("startup",       "startup",     5),
+    ("parts",         "parts_list",  8),
+    ("coverage",      "procedure",  20),   # final sweep — best remaining procedure chunks
 ]
 
 logger = logging.getLogger(__name__)

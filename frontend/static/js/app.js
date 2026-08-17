@@ -854,10 +854,15 @@ function _updatePipelineUI(data) {
       return;
     }
 
-    // Show PM Library badge if tasks came from the library fallback
-    const fromLibrary = tasks.length > 0 && tasks.some(t => t._source === 'pm_library');
+    // Show source badge based on task origins
+    const hasLibrary = tasks.some(t => t._source === 'pm_library');
+    const hasAI = tasks.some(t => t._source === 'ai_extracted' || !t._source);
+    const fromLibrary = hasLibrary && !hasAI;  // pure fallback
+    const fromMixed = hasLibrary && hasAI;      // AI + PM Library supplement
     const libraryBadge = fromLibrary
       ? `<span style="background:#EEF2FF;color:#4338CA;border:1px solid #C7D2FE;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;margin-left:8px">📚 PM Library</span>`
+      : fromMixed
+      ? `<span style="background:#F0FDF4;color:#166534;border:1px solid #BBF7D0;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;margin-left:8px">🤖+📚 AI + Library</span>`
       : '';
 
     // Build interval list from extracted_tasks (or fall back if tasks array not in poll data)
@@ -896,7 +901,7 @@ function _updatePipelineUI(data) {
 
       <div style="font-size:11.5px;color:#475569;margin-bottom:10px">
         <strong>${mfr}</strong> — ${taskCount} tasks across <strong>${intervals.length} PM interval${intervals.length!==1?'s':''}</strong>
-        ${fromLibrary ? ' · <span style="color:#4338CA;font-weight:600">Loaded from PM Library</span>' : ''}
+        ${fromLibrary ? ' · <span style="color:#4338CA;font-weight:600">Loaded from PM Library</span>' : fromMixed ? ' · <span style="color:#166534;font-weight:600">AI extracted + PM Library supplemented</span>' : ''}
         ${isApproved ? ` · Approved by <strong>${data.approved_by || 'engineer'}</strong>` : ' · Select an interval to review and approve:'}
       </div>
 

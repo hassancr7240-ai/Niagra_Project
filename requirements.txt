@@ -28,5 +28,4 @@ bandit>=1.7.8
 # Azure App Insights telemetry (optional — needed for production monitoring)
 azure-monitor-opentelemetry>=1.6.0
 # Production database drivers
-# aioodbc>=0.5.0   # uncomment for Azure SQL / MSSQL async
-# asyncpg>=0.29.0  # uncomment for PostgreSQL async
+aioodbc>=0.5.0   # Azure SQL / MSSQL async

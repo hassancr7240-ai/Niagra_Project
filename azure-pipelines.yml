@@ -9,7 +9,7 @@ variables:
   imageRepository: 'pm-automation'
   dockerfilePath: 'Dockerfile'
   tag: '$(Build.BuildId)'
-  appServiceName: 'pm-automation-web'             # UPDATE: App Service name manager created
+  appServiceName: 'fn-dev-pmw'                    # App Service created by manager
   resourceGroup: 'rg-dev-IntegrationTeamAI'
 
 stages:

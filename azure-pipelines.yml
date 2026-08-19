@@ -5,11 +5,11 @@ trigger:
       - main
 
 variables:
-  containerRegistry: 'asp-dev-pmw'               # Azure Container Registry name
+  containerRegistry: 'acrregistrymcp'             # Azure Container Registry (actual name)
   imageRepository: 'pm-automation'
   dockerfilePath: 'Dockerfile'
   tag: '$(Build.BuildId)'
-  appServiceName: 'fn-dev-pmw'                    # App Service created by manager
+  appServiceName: 'pm-automation-web'             # App Service (manager needs to create this)
   resourceGroup: 'rg-dev-IntegrationTeamAI'
 
 stages:

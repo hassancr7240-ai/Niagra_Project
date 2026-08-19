@@ -36,19 +36,15 @@ stages:
     displayName: Deploy to Azure App Service
     dependsOn: Build
     jobs:
-      - deployment: DeployToAppService
+      - job: DeployToAppService
         displayName: Deploy to App Service
-        environment: development
         pool:
           vmImage: ubuntu-latest
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: AzureWebAppContainer@1
-                  displayName: Deploy container to App Service
-                  inputs:
-                    azureSubscription: 'Niagara Development'
-                    appName: $(appServiceName)
-                    resourceGroupName: $(resourceGroup)
-                    containers: $(containerRegistry).azurecr.io/$(imageRepository):$(tag)
+        steps:
+          - task: AzureWebAppContainer@1
+            displayName: Deploy container to App Service
+            inputs:
+              azureSubscription: 'Niagara Development'
+              appName: $(appServiceName)
+              resourceGroupName: $(resourceGroup)
+              containers: $(containerRegistry).azurecr.io/$(imageRepository):$(tag)

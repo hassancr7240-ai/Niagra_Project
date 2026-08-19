@@ -21,16 +21,20 @@ stages:
         pool:
           vmImage: ubuntu-latest
         steps:
-          - task: Docker@2
-            displayName: Build and push to container registry
+          - task: AzureCLI@2
+            displayName: Build and push to ACR
             inputs:
-              command: buildAndPush
-              repository: $(imageRepository)
-              dockerfile: $(dockerfilePath)
-              containerRegistry: $(containerRegistry)
-              tags: |
-                $(tag)
-                latest
+              azureSubscription: 'Niagara Development'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr login --name $(containerRegistry)
+                docker build -f $(dockerfilePath) \
+                  -t $(containerRegistry).azurecr.io/$(imageRepository):$(tag) \
+                  -t $(containerRegistry).azurecr.io/$(imageRepository):latest \
+                  .
+                docker push $(containerRegistry).azurecr.io/$(imageRepository):$(tag)
+                docker push $(containerRegistry).azurecr.io/$(imageRepository):latest
 
   - stage: Deploy
     displayName: Deploy to Azure App Service

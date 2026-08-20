@@ -660,18 +660,27 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
         ws.cell(row=row, column=c).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
     row += 1
 
-    # Task rows
-    for t in tasks:
-        task_no = getattr(t, "task_no", None) if not isinstance(t, dict) else t.get("task_no")
+    # Task rows — renumber sequentially per sheet (10, 20, 30…)
+    for seq, t in enumerate(tasks, start=1):
+        task_no = seq * 10
         area = getattr(t, "area", None) if not isinstance(t, dict) else t.get("area")
         desc = getattr(t, "description", None) if not isinstance(t, dict) else t.get("description")
+        action = getattr(t, "action", None) if not isinstance(t, dict) else t.get("action")
+
+        # Build human-readable action string: "REPLACE FILTER CARTRIDGE — CARTRIDGE A"
+        desc_upper = (desc or "").upper().strip()
+        action_upper = (action or "").upper().strip()
+        if action_upper and not desc_upper.startswith(action_upper):
+            action_text = f"{action_upper} {desc_upper}".strip()
+        else:
+            action_text = desc_upper
 
         _fmt_cell(ws, row, 1, task_no, align="right")
         _merge_box(ws, row, 2, 4)
         ws.cell(row=row, column=2, value=(area or "").upper())
         ws.cell(row=row, column=2).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
         _merge_box(ws, row, 5, 9)
-        ws.cell(row=row, column=5, value=(desc or "").upper())
+        ws.cell(row=row, column=5, value=action_text)
         ws.cell(row=row, column=5).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
         _merge_box(ws, row, 10, 11)
         row += 1

@@ -591,16 +591,22 @@ def smart_chunk_pdf(
     Structure-aware PDF chunking — preferred entry point.
 
     Parser priority:
-      1. Azure Document Intelligence — accurate page numbers, tables, headings (production)
-      2. pdfplumber structure-aware  — table rows → section → checkbox (local dev)
-      3. Sliding window              — last-resort fallback only
+      1. Azure Document Intelligence — accurate page numbers, tables, headings (when configured)
+      2. IBM Docling                 — layout-aware, table-aware, free, local
+      3. pdfplumber                  — fallback if Docling is unavailable
+      4. Sliding window              — absolute last resort
     """
-    # Try Azure Document Intelligence first (production path)
+    # Priority 1: Azure Document Intelligence
     adi_chunks = _parse_with_doc_intelligence(pdf_path, source_file, manual_id, manual_version)
     if adi_chunks:
         return adi_chunks
 
-    # pdfplumber path (local dev / ADI not configured)
+    # Priority 2: IBM Docling
+    docling_chunks = _parse_with_docling(pdf_path, source_file, manual_id, manual_version)
+    if docling_chunks:
+        return docling_chunks
+
+    # Priority 3: pdfplumber (fallback)
     with pdfplumber.open(str(pdf_path)) as pdf:
         table_chunks = _extract_table_chunks(pdf, source_file, manual_id, manual_version)
         section_chunks = _extract_section_chunks(
@@ -616,6 +622,133 @@ def smart_chunk_pdf(
         return chunk_text(full_text, source_file, page_offsets=page_offsets)
 
     return all_chunks
+
+
+def _parse_with_docling(
+    pdf_path: Path,
+    source_file: str,
+    manual_id: str,
+    manual_version: str,
+) -> list[TextChunk]:
+    """
+    IBM Docling — layout-aware PDF parser.
+    Understands multi-column text, reading order, tables, and section headings far
+    better than pdfplumber. Returns [] if docling is not installed or conversion fails.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    try:
+        from docling.document_converter import DocumentConverter  # type: ignore
+    except ImportError:
+        _log.debug("docling not installed — skipping (pdfplumber fallback will run)")
+        return []
+
+    try:
+        converter = DocumentConverter()
+        result = converter.convert(str(pdf_path))
+        md_text = result.document.export_to_markdown()
+    except Exception as exc:
+        _log.warning("[docling] Conversion failed (%s) — falling back to pdfplumber", exc)
+        return []
+
+    if not md_text.strip():
+        return []
+
+    chunks = _docling_md_to_chunks(md_text, source_file, manual_id, manual_version)
+    _log.info("[docling] %d chunks extracted from %s", len(chunks), source_file)
+    return chunks
+
+
+def _docling_md_to_chunks(
+    md_text: str,
+    source_file: str,
+    manual_id: str,
+    manual_version: str,
+) -> list[TextChunk]:
+    """Convert Docling's Markdown output into TextChunks."""
+    chunks: list[TextChunk] = []
+    idx = 0
+    current_heading = ""
+    lines = md_text.splitlines()
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # ── Heading ──────────────────────────────────────────────────────
+        if line.startswith("#"):
+            current_heading = line.lstrip("#").strip()
+            i += 1
+            continue
+
+        # ── Table (pipe-delimited) ────────────────────────────────────────
+        if line.startswith("|"):
+            table_lines: list[str] = []
+            while i < len(lines) and lines[i].startswith("|"):
+                table_lines.append(lines[i])
+                i += 1
+            # skip separator rows (|---|---|)
+            content_rows = [r for r in table_lines
+                            if not re.match(r'^\|[\s\-:|]+\|', r)]
+            if content_rows:
+                table_text = "\n".join(table_lines)
+                chunks.append(TextChunk(
+                    chunk_id=f"{source_file}__dl_{idx:04d}",
+                    text=f"[TABLE]\n{table_text}",
+                    page_start=0,
+                    page_end=0,
+                    char_start=0,
+                    char_end=0,
+                    source_file=source_file,
+                    chunk_type="table_row",
+                    section_heading=current_heading,
+                    content_type="table",
+                    manual_id=manual_id,
+                    manual_version=manual_version,
+                ))
+                idx += 1
+            continue
+
+        # ── Paragraph / checkbox ──────────────────────────────────────────
+        para_lines: list[str] = []
+        while i < len(lines) and lines[i].strip() \
+                and not lines[i].startswith("#") \
+                and not lines[i].startswith("|"):
+            para_lines.append(lines[i].strip())
+            i += 1
+
+        para_text = " ".join(para_lines).strip()
+        if len(para_text) < 20:
+            i += 1  # skip blank / very short lines
+            continue
+
+        has_checkbox = bool(re.search(r'[☐☑☒✓✔□■]|^\s*[-*]\s+', para_text))
+        chunk_type = "checkbox" if has_checkbox else "paragraph"
+        content_type = _detect_content_type(para_text, current_heading, chunk_type)
+
+        # Split large paragraphs so they don't exceed the model context
+        words = para_text.split()
+        step = 400
+        for w_start in range(0, len(words), step):
+            segment = " ".join(words[w_start: w_start + step])
+            chunks.append(TextChunk(
+                chunk_id=f"{source_file}__dl_{idx:04d}",
+                text=segment,
+                page_start=0,
+                page_end=0,
+                char_start=0,
+                char_end=0,
+                source_file=source_file,
+                chunk_type=chunk_type,
+                section_heading=current_heading,
+                content_type=content_type,
+                manual_id=manual_id,
+                manual_version=manual_version,
+            ))
+            idx += 1
+
+    return chunks
 
 
 _TEXT_PAGE_CAP = 60   # extract text from at most this many pages (enough for 15 000-char sample)

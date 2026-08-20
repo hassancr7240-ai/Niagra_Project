@@ -17,9 +17,7 @@ _WATSONX_CONCURRENCY = 5
 async def embed_chunks(chunks: list[TextChunk]) -> list[dict]:
     if not chunks:
         return []
-    if settings.ai_provider == "watsonx":
-        return await _embed_watsonx(chunks)
-    return await _embed_ollama(chunks)
+    return await _embed_watsonx(chunks)
 
 
 def _chunk_to_dict(chunk: TextChunk, embedding: list[float]) -> dict:
@@ -34,51 +32,6 @@ def _chunk_to_dict(chunk: TextChunk, embedding: list[float]) -> dict:
         "section_heading": getattr(chunk, "section_heading", ""),
         "interval_hint": getattr(chunk, "interval_hint", None),
     }
-
-
-async def _embed_ollama(chunks: list[TextChunk]) -> list[dict]:
-    """
-    Ollama native /api/embed — forces CPU mode via num_gpu=0.
-    Uses the native Ollama REST endpoint (not the OpenAI-compat one) so we
-    can pass options.num_gpu=0 and bypass the CUDA PTX toolchain crash that
-    occurs when the GPU driver version doesn't match the compiled model.
-    Sequential batches (no concurrency) — CPU handles one at a time anyway.
-    """
-    import httpx
-
-    base = (settings.openai_base_url or "http://localhost:11434/v1").rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
-    url = f"{base}/api/embed"
-    model = settings.openai_embedding_model
-    batch_size = 10  # small batches — gentler on CPU RAM
-
-    batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
-    results: list[dict] = []
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        for batch in batches:
-            texts = [c.text for c in batch]
-            try:
-                resp = await client.post(url, json={
-                    "model": model,
-                    "input": texts,
-                    "options": {"num_gpu": 0},  # force CPU — avoids CUDA crash
-                })
-                resp.raise_for_status()
-                data = resp.json()
-                embeddings = data.get("embeddings", [])
-                if len(embeddings) == len(batch):
-                    results.extend(_chunk_to_dict(batch[j], emb) for j, emb in enumerate(embeddings))
-                else:
-                    logger.warning("Ollama embedding count mismatch: got %d for %d chunks",
-                                   len(embeddings), len(batch))
-            except Exception as exc:
-                logger.error("Ollama embedding batch failed: %s", exc)
-
-    logger.info("Ollama (CPU) embedded %d/%d chunks in %d batches",
-                len(results), len(chunks), len(batches))
-    return results
 
 
 async def _embed_watsonx(chunks: list[TextChunk]) -> list[dict]:

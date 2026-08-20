@@ -47,10 +47,10 @@ async def classify_manual(pdf_path: Path, sample_text: str) -> ClassificationRes
 
     try:
         import asyncio as _asyncio
-        if settings.ai_provider == "watsonx" and settings.watsonx_api_key:
+        if settings.watsonx_api_key:
             ai_coro = _ai_classify_watsonx(sample_text)
         else:
-            ai_coro = _ai_classify_ollama(sample_text)
+            return result
         ai_result = await _asyncio.wait_for(ai_coro, timeout=25)
         if ai_result.confidence > result.confidence:
             return ai_result
@@ -204,49 +204,6 @@ def _detect_maintenance_chapters(text_lower: str) -> list[int]:
         if ch not in chapters:
             chapters.append(ch)
     return chapters[:3]
-
-
-async def _ai_classify_ollama(sample_text: str) -> ClassificationResult:
-    from openai import AsyncOpenAI
-    import json
-
-    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-    truncated = sample_text[:4000]
-
-    prompt = f"""You are a technical document classifier for industrial machinery manuals.
-
-Analyse the following text excerpt from a machine operating manual and identify:
-1. Manufacturer name (e.g. Krones, eisbär, ABB, etc.)
-2. Machine model (if identifiable)
-3. Chapter numbers that contain maintenance/service content
-
-Return ONLY valid JSON in this exact format:
-{{"manufacturer": "...", "model": "...", "maintenance_chapters": [11, 12], "machine_type": "KRONES|THIRD_PARTY"}}
-
-Text:
-{truncated}"""
-
-    response = await client.chat.completions.create(
-        model=settings.openai_model_classification,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=200,
-    )
-
-    content = response.choices[0].message.content or "{}"
-    data = json.loads(content)
-
-    mfr = data.get("manufacturer", "THIRD_PARTY").upper()
-    mtype = "KRONES" if "KRONES" in mfr else "THIRD_PARTY"
-
-    return ClassificationResult(
-        manufacturer=mfr,
-        model=data.get("model"),
-        machine_type=mtype,
-        confidence=0.85,
-        method="ai",
-        detected_chapters=data.get("maintenance_chapters", []),
-    )
 
 
 async def _ai_classify_watsonx(sample_text: str) -> ClassificationResult:

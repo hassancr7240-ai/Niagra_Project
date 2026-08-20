@@ -17,25 +17,6 @@ from app.rag.embedder import embed_chunks
 from app.rag.extractor import extract_tasks_from_chunks
 from app.rag.retriever import index_chunks, retrieve_top_k
 
-# ── 8-Pass retrieval config ────────────────────────────────────────────────────
-# Each pass targets a specific content type. For local dev, filters by content_type.
-# For production (Azure AI Search), these become separate hybrid search queries.
-# IMPORTANT: "table" pass is FIRST so maintenance table rows occupy positions 0-14
-# in the selected list — the AI only reads chunks[:20] so table data must come first.
-_RETRIEVAL_PASSES: list[tuple[str, str, int]] = [
-    # (pass_name, content_type_filter, max_chunks_per_pass)
-    # granite3.3:8b has 128K context — batched extraction handles up to 60 chunks per call,
-    # so raise limits here to feed it as many maintenance chunks as the PDF contains.
-    ("interval",      "table",      15),   # FIRST — maintenance table rows / checkboxes
-    ("toc_schedule",  "toc",         3),
-    ("warnings",      "warning",     3),
-    ("loto",          "loto",        3),
-    ("ppe_tools",     "ppe",         3),
-    ("startup",       "startup",     3),
-    ("parts",         "parts_list",  4),
-    ("coverage",      "procedure",   8),   # final sweep — best remaining procedure chunks
-]
-
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -120,25 +101,15 @@ async def run_pipeline(
         chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
         interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
 
-        if settings.ai_provider != "watsonx":
-            # Local dev fast path: skip embedding — use 8-pass content_type filtering instead
-            top_chunks = _retrieve_8_pass_local(chunks, interval_hints)
-            if not top_chunks:
-                top_chunks = _select_top_chunks_by_type(chunks, settings.rag_top_k)
-            embedded = []
-            logger.info("[%s] Local dev 8-pass: selected %d chunks across %d passes",
-                        manual_id, len(top_chunks), len(_RETRIEVAL_PASSES))
-        else:
-            # Production: full embed + index + Azure AI Search hybrid retrieval
-            priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
-            others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
-            embed_subset = (priority + others)[:200]
-            logger.info("[%s] Embedding %d/%d chunks", manual_id, len(embed_subset), len(chunks))
-            embedded = await embed_chunks(embed_subset)
-            logger.info("[%s] Embedded %d chunks", manual_id, len(embedded))
-            if embedded:
-                await index_chunks(embedded, manual_id)
-            top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
+        priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
+        others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
+        embed_subset = (priority + others)[:200]
+        logger.info("[%s] Embedding %d/%d chunks", manual_id, len(embed_subset), len(chunks))
+        embedded = await embed_chunks(embed_subset)
+        logger.info("[%s] Embedded %d chunks", manual_id, len(embedded))
+        if embedded:
+            await index_chunks(embedded, manual_id)
+        top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
 
         await _update_status(db, manual_id, "EXTRACTING")
 
@@ -328,121 +299,6 @@ async def _retrieve_maintenance_chunks(
         logger.warning("[%s] Semantic retrieval failed, using positional fallback: %s", manual_id, exc)
 
     return _to_chunk_dicts(embedded[:10])
-
-
-def _retrieve_8_pass_local(
-    chunks: list[TextChunk],
-    interval_hints: list[int],
-) -> list[dict]:
-    """
-    8-pass retrieval for local dev (no Azure AI Search).
-    Mirrors the production strategy but filters by content_type + chunk_type
-    instead of running semantic queries against Azure AI Search.
-
-    Production equivalent: each pass becomes a separate hybrid BM25+semantic
-    query against the Azure AI Search index with a content_type filter.
-    """
-    selected: list[dict] = []
-    seen_ids: set[str] = set()
-
-    def _chunk_to_dict(c: TextChunk) -> dict:
-        return {
-            "text": c.text,
-            "page_start": c.page_start,
-            "page_end": c.page_end,
-            "section": c.section_heading,
-            "content_type": c.content_type,
-            "source_file": c.source_file,
-            "chunk_id": c.chunk_id,
-            "manual_id": c.manual_id,
-            "manual_version": c.manual_version,
-        }
-
-    def _add(subset: list[TextChunk], max_n: int) -> None:
-        for c in subset:
-            if len([x for x in selected if x.get("content_type") == c.content_type]) >= max_n:
-                break
-            if c.chunk_id not in seen_ids:
-                seen_ids.add(c.chunk_id)
-                selected.append(_chunk_to_dict(c))
-
-    def _has_content(c: TextChunk) -> bool:
-        """Reject table rows that only contain a section header and no task text."""
-        t = c.text.strip()
-        if not t:
-            return False
-        # pdfplumber sometimes produces table rows that are just "[TABLE ROW] col_0: <heading>"
-        # with no actual task description — these are useless for extraction.
-        if c.chunk_type == "table_row" and t.count("col_") <= 1 and len(t) < 80:
-            return False
-        return True
-
-    by_content: dict[str, list[TextChunk]] = {}
-    for c in chunks:
-        by_content.setdefault(c.content_type, []).append(c)
-
-    def _sort_by_interval(subset: list[TextChunk]) -> list[TextChunk]:
-        """Sort so interval-matching chunks come first, then any-interval, then no-interval."""
-        def _rank(c: TextChunk) -> int:
-            if interval_hints and c.interval_hint in interval_hints:
-                return 0
-            if c.interval_hint and c.interval_hint >= 8:
-                return 1
-            return 2
-        return sorted(subset, key=_rank)
-
-    for pass_name, content_type, max_n in _RETRIEVAL_PASSES:
-        if content_type == "table":
-            # Pass 1 — interval tasks: table_row + checkbox chunks; filter header-only rows
-            interval_chunks = [
-                c for c in chunks
-                if c.chunk_type in ("table_row", "checkbox")
-                and c.chunk_id not in seen_ids
-                and _has_content(c)
-            ]
-            interval_chunks = _sort_by_interval(interval_chunks)
-            _add(interval_chunks, max_n)
-        elif content_type == "procedure":
-            # Pass 8 — coverage sweep: best remaining section/paragraph chunks
-            remaining = [
-                c for c in chunks
-                if c.chunk_id not in seen_ids
-                and c.chunk_type in ("section", "paragraph", "checkbox")
-                and _has_content(c)
-            ]
-            _add(remaining, max_n)
-        else:
-            # Sort non-table passes by interval match so relevant chunks beat irrelevant ones
-            subset = _sort_by_interval(by_content.get(content_type, []))
-            _add(subset, max_n)
-
-        logger.debug("[8-pass] %s → %d total selected so far", pass_name, len(selected))
-
-    logger.info("[8-pass] Final: %d chunks from %d passes", len(selected), len(_RETRIEVAL_PASSES))
-    return selected
-
-
-def _select_top_chunks_by_type(chunks: list, top_k: int) -> list[dict]:
-    """
-    Legacy local dev fast path — kept as ultimate fallback if 8-pass returns nothing.
-    Priority: table_row → checkbox → section → paragraph → text
-    """
-    order = ("table_row", "checkbox", "section", "paragraph", "text")
-    by_type: dict[str, list] = {}
-    for c in chunks:
-        by_type.setdefault(c.chunk_type, []).append(c)
-    selected = []
-    for t in order:
-        selected.extend(by_type.get(t, []))
-        if len(selected) >= top_k:
-            break
-    return [
-        {"text": c.text, "page_start": c.page_start, "page_end": c.page_end,
-         "section": getattr(c, "section_heading", ""), "content_type": getattr(c, "content_type", "procedure"),
-         "source_file": c.source_file, "chunk_id": c.chunk_id,
-         "manual_id": getattr(c, "manual_id", ""), "manual_version": getattr(c, "manual_version", "")}
-        for c in selected[:top_k]
-    ]
 
 
 def _validate_task_citations(tasks: list[dict], citation_records: list[dict]) -> list[dict]:

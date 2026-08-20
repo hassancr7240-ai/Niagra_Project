@@ -650,7 +650,7 @@ const PIPELINE_STEPS = [
   { key: 'UPLOADED',       label: 'Uploaded',               icon: '📤', est: null },
   { key: 'CLASSIFYING',    label: 'Classifying manufacturer', icon: '🔍', est: '~5s' },
   { key: 'CHUNKING',       label: 'Smart chunking',          icon: '✂️', est: '~10s' },
-  { key: 'EMBEDDING',      label: 'Embedding chunks (CPU)',   icon: '🧠', est: '1-3 min' },
+  { key: 'EMBEDDING',      label: 'Embedding chunks (watsonx)', icon: '🧠', est: '1-3 min' },
   { key: 'EXTRACTING',     label: 'Extracting PM tasks',     icon: '⚙️', est: '~30s' },
   { key: 'PENDING_REVIEW', label: 'Ready — awaiting review', icon: '✅', est: null },
   { key: 'APPROVED',       label: 'Approved',                icon: '🎉', est: null },

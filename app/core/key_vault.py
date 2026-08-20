@@ -32,7 +32,6 @@ async def load_secrets_from_key_vault() -> bool:
             "pm-azure-ad-client-secret":            "AZURE_AD_CLIENT_SECRET",
             "pm-azure-storage-connection-string":   "AZURE_STORAGE_CONNECTION_STRING",
             "pm-database-url":                      "DATABASE_URL",
-            "pm-openai-api-key":                    "OPENAI_API_KEY",
             "pm-watsonx-api-key":                   "WATSONX_API_KEY",
             "pm-azure-search-api-key":              "AZURE_SEARCH_API_KEY",
             "pm-azure-doc-intelligence-key":        "AZURE_DOC_INTELLIGENCE_KEY",

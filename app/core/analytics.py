@@ -29,7 +29,7 @@ async def analyse_pm_patterns(
     Analyses PM history, predicts next due dates, identifies overdue patterns.
     Falls back to rule-based analysis if watsonx is not configured.
     """
-    if settings.ai_provider == "watsonx" and settings.watsonx_api_key:
+    if settings.watsonx_api_key:
         try:
             return await _watsonx_analytics(records, machines, current_hours_map)
         except Exception as exc:
@@ -196,7 +196,7 @@ def _rule_based_analytics(
         "predicted_next_due": predicted_next_due[:10],
         "patterns": patterns[:5],
         "recommendations": recommendations[:5],
-        "provider": "rule-based" if settings.ai_provider != "watsonx" else "watsonx-fallback",
+        "provider": "rule-based-fallback",
     }
 
 

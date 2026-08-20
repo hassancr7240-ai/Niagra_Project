@@ -702,7 +702,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     full_text, _offsets = await text_task
     sample_text = full_text[:15000]
 
-    # Classify finishes in ~5s; wrap with timeout so a crashed Ollama can't hang forever
+    # Classify finishes in ~5s; wrap with timeout to prevent hanging on slow network
     try:
         classification = await asyncio.wait_for(
             classify_manual(pdf_path, sample_text), timeout=30
@@ -734,7 +734,6 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     update_fn("EMBEDDING")
     from app.rag.pipeline import (
-        _retrieve_8_pass_local, _select_top_chunks_by_type,
         _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
         _extract_pmrspl_direct, _assign_task_page_citations,
     )
@@ -808,32 +807,23 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
     interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
 
-    if settings.ai_provider != "watsonx":
-        # Local dev fast path: 8-pass content_type filtering — no embedding needed
-        top_chunks = _retrieve_8_pass_local(chunks, interval_hints)
-        if not top_chunks:
-            top_chunks = _select_top_chunks_by_type(chunks, settings.rag_top_k)
-        embedded = []
-        log.info("[%s] Local dev 8-pass: selected %d chunks", manual_id, len(top_chunks))
+    priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
+    others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
+    embed_subset = (priority + others)[:200]
+    embedded = await embed_chunks(embed_subset)
+    log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
+    if embedded:
+        await index_chunks(embedded, manual_id)
+    proxy = next(
+        (e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")),
+        embedded[0] if embedded else None,
+    )
+    if proxy:
+        top_chunks = await retrieve_top_k(proxy["embedding"], manual_id=manual_id, top_k=10)
     else:
-        # Production: full embed + index + Azure AI Search hybrid retrieval
-        priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
-        others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
-        embed_subset = (priority + others)[:200]
-        embedded = await embed_chunks(embed_subset)
-        log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
-        if embedded:
-            await index_chunks(embedded, manual_id)
-        proxy = next(
-            (e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")),
-            embedded[0] if embedded else None,
-        )
-        if proxy:
-            top_chunks = await retrieve_top_k(proxy["embedding"], manual_id=manual_id, top_k=10)
-        else:
-            top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0),
-                           "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
-                          for e in embedded[:10]]
+        top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0),
+                       "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
+                      for e in embedded[:10]]
 
     extracted_tasks = await extract_tasks_from_chunks(
         top_chunks,

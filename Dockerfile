@@ -6,7 +6,10 @@ ENV APP_ENV=${APP_ENV} \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Docling stores ML models here — baked into the image so first PDF upload is instant
+    DOCLING_ARTIFACTS_PATH=/opt/docling-models \
+    HF_HOME=/opt/docling-models/hf
 
 WORKDIR /app
 
@@ -29,6 +32,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
+
+# Pre-download IBM Docling ML models into the image (avoids slow first-run download)
+# Models are stored in DOCLING_ARTIFACTS_PATH (/opt/docling-models) — baked into layer.
+# If download fails (no internet at build time), the app will download on first PDF upload.
+RUN python -c "
+from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+StandardPdfPipeline.download_models_hf(force=True)
+print('Docling models pre-downloaded successfully')
+" || echo "WARNING: Docling model pre-download failed — will download on first use"
 
 # Copy application source (NOT data/ — DB starts fresh in production)
 COPY app/      ./app/

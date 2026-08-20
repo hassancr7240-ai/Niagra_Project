@@ -51,22 +51,8 @@ class Settings(BaseSettings):
     ftp_key_path: Optional[str] = None
     ftp_remote_base_path: str = "/pm-docs"
 
-    # ── AI Provider ───────────────────────────────────────────────────────────
-    # Production : AI_PROVIDER=watsonx  -> IBM watsonx.ai (Granite models, cloud)
-    # Local dev  : AI_PROVIDER=openai   -> Ollama running IBM Granite locally
-    #              OPENAI_BASE_URL=http://localhost:11434/v1
-    #              OPENAI_API_KEY=ollama
-    ai_provider: str = "watsonx"  # watsonx (production) | openai (Ollama local dev only)
-
-    # Ollama local dev (IBM Granite via Ollama) - NOT used in production
-    openai_api_key: Optional[str] = None          # set to "ollama" for local Ollama
-    openai_base_url: Optional[str] = None         # e.g. http://localhost:11434/v1
-    openai_model_generation: str = "granite3.3:8b"
-    openai_model_classification: str = "granite3.3:8b"
-    openai_embedding_model: str = "granite-embedding:latest"
-    openai_embedding_dims: int = 384              # granite-embedding output size
-
-    # IBM watsonx.ai - all production AI runs here (IBM Granite models)
+    # ── IBM watsonx.ai ────────────────────────────────────────────────────────
+    # Sole AI provider — IBM Granite models via watsonx.ai cloud.
     # Task extraction  : ibm/granite-3-8b-instruct   (set via WATSONX_MODEL_GENERATION)
     # Classification   : ibm/granite-3-2b-instruct   (set via WATSONX_MODEL_CLASSIFICATION)
     # Analytics        : ibm/granite-3-8b-instruct   (set via WATSONX_MODEL_ANALYTICS)

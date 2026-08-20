@@ -69,10 +69,7 @@ async def extract_tasks_from_chunks(
         if not batch:
             break
         combined_text = "\n\n---\n\n".join(c["text"][:500] for c in batch)
-        if settings.ai_provider == "watsonx":
-            batch_tasks = await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
-        else:
-            batch_tasks = await _extract_ollama(combined_text, manufacturer, model, interval_hints)
+        batch_tasks = await _extract_watsonx(combined_text, manufacturer, model, interval_hints)
         all_tasks.extend(batch_tasks)
         logger.info("Extraction batch %d-%d → %d tasks (running total %d)",
                     batch_start, batch_start + len(batch), len(batch_tasks), len(all_tasks))
@@ -87,49 +84,6 @@ async def extract_tasks_from_chunks(
             unique.append(t)
 
     return unique
-
-async def _extract_ollama(  # Ollama local via OpenAI-compatible API
-
-    text: str,
-    manufacturer: str,
-    model: Optional[str],
-    interval_hints: Optional[list[int]],
-) -> list[dict]:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-
-    user_msg = f"""Machine: {manufacturer} {model or ''}
-Known intervals (hours): {interval_hints or 'detect from text'}
-
-Manual text:
-{text[:6000]}
-
-Return a JSON array of task objects only. Example: [{{"task_no":10,"area":"FILTER",...}}]"""
-
-    try:
-        response = await client.chat.completions.create(
-            model=settings.openai_model_generation,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0,
-            max_tokens=3000,
-        )
-        content = response.choices[0].message.content or "[]"
-        # Model may return a bare array or {"tasks":[...]} wrapper
-        raw = _extract_json_array(content)
-        if raw == "[]":
-            data = json.loads(content) if content.strip().startswith("{") else []
-            tasks = data.get("tasks", []) if isinstance(data, dict) else []
-        else:
-            tasks = json.loads(raw)
-        return _validate_tasks(tasks)
-    except Exception as exc:
-        logger.error("OpenAI task extraction failed: %s", exc)
-        return []
-
 
 async def _extract_watsonx(
     text: str,

@@ -35,12 +35,8 @@ RUN pip install --upgrade pip \
 
 # Pre-download IBM Docling ML models into the image (avoids slow first-run download)
 # Models are stored in DOCLING_ARTIFACTS_PATH (/opt/docling-models) — baked into layer.
-# If download fails (no internet at build time), the app will download on first PDF upload.
-RUN python -c "
-from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
-StandardPdfPipeline.download_models_hf(force=True)
-print('Docling models pre-downloaded successfully')
-" || echo "WARNING: Docling model pre-download failed — will download on first use"
+COPY scripts/download_docling_models.py /tmp/download_docling_models.py
+RUN python /tmp/download_docling_models.py
 
 # Copy application source (NOT data/ — DB starts fresh in production)
 COPY app/      ./app/

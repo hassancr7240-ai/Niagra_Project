@@ -579,8 +579,11 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
 
     log = logging.getLogger(__name__)
 
-    # Path to the SQLite file (same one the ORM uses)
-    db_path = str(_Path(__file__).parent.parent.parent.parent / "data" / "pm_automation.db")
+    # Path to the SQLite file — derived from settings (same source as the ORM)
+    from app.config import get_settings as _get_settings
+    _eff_url = _get_settings().effective_database_url
+    # strip sqlite:/// or sqlite+aiosqlite:/// prefix to get the raw file path
+    db_path = _eff_url.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
 
     def _raw_update(status: str, error: str = "") -> None:
         """Write status update via raw sqlite3 in autocommit mode — no lock contention."""
@@ -665,9 +668,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     import json
     import logging
     from pathlib import Path as _Path
-    # db_path must be defined here — this function is called from _run_pipeline_task
-    # which defines its own db_path, but that variable is not in scope here.
-    db_path = str(_Path(__file__).parent.parent.parent.parent / "data" / "pm_automation.db")
+    from app.config import get_settings as _get_settings2
+    _eff_url2 = _get_settings2().effective_database_url
+    db_path = _eff_url2.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
     from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
     from app.rag.classifier import classify_manual, extract_manual_version
     from app.rag.embedder import embed_chunks

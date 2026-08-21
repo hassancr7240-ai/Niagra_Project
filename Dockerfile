@@ -35,12 +35,10 @@ COPY app/      ./app/
 COPY frontend/ ./frontend/
 COPY data/pm_library.json ./data/pm_library.json
 
-# On Azure App Service Linux, /home is the ONLY persistent directory.
-# We symlink our data + output dirs there so files survive container restarts.
-RUN mkdir -p /home/data /home/output/pm-docs /home/uploads \
-    && ln -sf /home/data    /app/data \
-    && ln -sf /home/output  /app/output \
-    && ln -sf /home/uploads /app/uploads
+# Create runtime directories directly inside the container.
+# No /home symlinks — Azure overlays /home on container start and wipes
+# anything the Docker build created there, breaking symlinks.
+RUN mkdir -p /app/data /app/output/pm-docs /app/uploads
 
 EXPOSE 8000
 

@@ -6,10 +6,7 @@ ENV APP_ENV=${APP_ENV} \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    # Docling stores ML models here — baked into the image so first PDF upload is instant
-    DOCLING_ARTIFACTS_PATH=/opt/docling-models \
-    HF_HOME=/opt/docling-models/hf
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
@@ -32,11 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
-
-# Pre-download IBM Docling ML models into the image (avoids slow first-run download)
-# Models are stored in DOCLING_ARTIFACTS_PATH (/opt/docling-models) — baked into layer.
-COPY scripts/download_docling_models.py /tmp/download_docling_models.py
-RUN python /tmp/download_docling_models.py
 
 # Copy application source (NOT data/ — DB starts fresh in production)
 COPY app/      ./app/

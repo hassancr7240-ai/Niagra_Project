@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -624,6 +625,9 @@ def smart_chunk_pdf(
     return all_chunks
 
 
+_DOCLING_TIMEOUT = 90   # seconds — fall back to pdfplumber if Docling takes longer
+
+
 def _parse_with_docling(
     pdf_path: Path,
     source_file: str,
@@ -632,22 +636,37 @@ def _parse_with_docling(
 ) -> list[TextChunk]:
     """
     IBM Docling — layout-aware PDF parser.
-    Understands multi-column text, reading order, tables, and section headings far
-    better than pdfplumber. Returns [] if docling is not installed or conversion fails.
+    OCR is disabled: maintenance manuals are digital text PDFs, not scanned images.
+    Hard timeout of 90 s — falls back to pdfplumber if conversion is still running.
     """
     import logging
     _log = logging.getLogger(__name__)
 
     try:
-        from docling.document_converter import DocumentConverter  # type: ignore
+        from docling.document_converter import DocumentConverter, PdfFormatOption  # type: ignore
+        from docling.datamodel.pipeline_options import PdfPipelineOptions          # type: ignore
+        from docling.datamodel.base_models import InputFormat                       # type: ignore
     except ImportError:
         _log.debug("docling not installed — skipping (pdfplumber fallback will run)")
         return []
 
+    def _run() -> str:
+        # do_ocr=False is the critical flag — OCR loads heavy ONNX models and
+        # processes every page even when the PDF already contains selectable text.
+        # Disabling it cuts conversion time from minutes to seconds on CPU.
+        opts = PdfPipelineOptions(do_ocr=False)
+        conv = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+        )
+        return conv.convert(str(pdf_path)).document.export_to_markdown()
+
     try:
-        converter = DocumentConverter()
-        result = converter.convert(str(pdf_path))
-        md_text = result.document.export_to_markdown()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run)
+            md_text = future.result(timeout=_DOCLING_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        _log.warning("[docling] Timed out after %ds — falling back to pdfplumber", _DOCLING_TIMEOUT)
+        return []
     except Exception as exc:
         _log.warning("[docling] Conversion failed (%s) — falling back to pdfplumber", exc)
         return []

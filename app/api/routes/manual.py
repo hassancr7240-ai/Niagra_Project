@@ -567,69 +567,72 @@ async def generate_xlsx_per_interval(
 async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
     """
     Background task wrapper.
-    Uses a raw sqlite3 connection (isolation_level=None = autocommit) for status
-    updates to avoid SQLAlchemy's connection-pool write-lock contention with the
-    main request session on SQLite.
+    Uses a sync SQLAlchemy engine for status updates — works with both SQLite
+    (local dev, DATABASE_URL unset) and Azure SQL (production, DATABASE_URL=mssql+pyodbc://...).
+    Raw sqlite3 cannot handle mssql URLs; using SQLAlchemy avoids that entirely.
+    The original request session is already committed and closed before this runs,
+    so there is no write-lock contention on either database.
     """
     import asyncio
     import logging
     import shutil
-    import sqlite3
     from pathlib import Path as _Path
 
     log = logging.getLogger(__name__)
 
-    # Path to the SQLite file — derived from settings (same source as the ORM)
-    from app.config import get_settings as _get_settings
-    _eff_url = _get_settings().effective_database_url
-    # strip sqlite:/// or sqlite+aiosqlite:/// prefix to get the raw file path
-    db_path = _eff_url.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
+    from sqlalchemy import text as _sql_text
+    from app.db.database import AsyncSessionLocal as _AsyncSessionLocal
 
-    def _raw_update(status: str, error: str = "") -> None:
-        """Write status update via raw sqlite3 in autocommit mode — no lock contention."""
+    async def _raw_update(status: str, error: str = "") -> None:
+        """Write status update via async ORM session — same engine the app uses, no blocking."""
         try:
-            conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
-            conn.execute("PRAGMA journal_mode=WAL")
-            if error:
-                conn.execute(
-                    "UPDATE manual_uploads SET status=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
-                    (status, error[:2000], manual_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE manual_uploads SET status=?, updated_at=CURRENT_TIMESTAMP WHERE manual_id=?",
-                    (status, manual_id),
-                )
-            conn.close()
+            async with _AsyncSessionLocal() as _session:
+                if error:
+                    await _session.execute(
+                        _sql_text("UPDATE manual_uploads SET status=:s, error_message=:e, updated_at=CURRENT_TIMESTAMP WHERE manual_id=:mid"),
+                        {"s": status, "e": error[:2000], "mid": manual_id},
+                    )
+                else:
+                    await _session.execute(
+                        _sql_text("UPDATE manual_uploads SET status=:s, updated_at=CURRENT_TIMESTAMP WHERE manual_id=:mid"),
+                        {"s": status, "mid": manual_id},
+                    )
+                await _session.commit()
         except Exception as e:
             log.warning("raw_update failed (%s): %s", status, e)
 
-    def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "") -> None:
-        """Write final pipeline results via raw sqlite3."""
+    async def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "") -> None:
+        """Write final pipeline results via async ORM session."""
         try:
-            conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(
-                """UPDATE manual_uploads
-                   SET status='PENDING_REVIEW',
-                       extracted_tasks=?,
-                       detected_manufacturer=?,
-                       detected_chapters=?,
-                       machine_id=COALESCE(NULLIF(machine_id,''), NULLIF(?,''), machine_id),
-                       updated_at=CURRENT_TIMESTAMP
-                   WHERE manual_id=?""",
-                (extracted_tasks_json, manufacturer, chapters_json, inferred_machine_id, manual_id),
-            )
-            conn.close()
+            async with _AsyncSessionLocal() as _session:
+                await _session.execute(
+                    _sql_text(
+                        "UPDATE manual_uploads"
+                        " SET status='PENDING_REVIEW',"
+                        "     extracted_tasks=:tasks,"
+                        "     detected_manufacturer=:mfr,"
+                        "     detected_chapters=:chapters,"
+                        "     machine_id=COALESCE(NULLIF(machine_id,''), NULLIF(:mid,''), machine_id),"
+                        "     updated_at=CURRENT_TIMESTAMP"
+                        " WHERE manual_id=:manual_id"
+                    ),
+                    {
+                        "tasks": extracted_tasks_json,
+                        "mfr": manufacturer,
+                        "chapters": chapters_json,
+                        "mid": inferred_machine_id,
+                        "manual_id": manual_id,
+                    },
+                )
+                await _session.commit()
         except Exception as e:
             log.warning("raw_finalize failed: %s", e)
 
-    # Run the actual pipeline work using raw status updates instead of ORM updates
     try:
         await _run_pipeline_direct(manual_id, pdf_path, _raw_update, _raw_finalize)
     except Exception as exc:
         log.error("Background pipeline task failed for %s: %s", manual_id, exc)
-        _raw_update("FAILED", str(exc))
+        await _raw_update("FAILED", str(exc))
     finally:
         parent = pdf_path.parent
         try:
@@ -661,16 +664,15 @@ def _infer_machine_id(manufacturer: str, model: Optional[str]) -> str:
 
 async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finalize_fn) -> None:
     """
-    Runs the full RAG pipeline calling update_fn(status) for progress updates
-    and finalize_fn(tasks_json, manufacturer, chapters_json, machine_id) when complete.
-    Avoids any ORM session for status writes — only uses raw sqlite3 via callbacks.
+    Runs the full RAG pipeline calling await update_fn(status) for progress updates
+    and await finalize_fn(tasks_json, manufacturer, chapters_json, machine_id) when done.
+    All DB writes go through async ORM sessions — no sync blocking on the event loop.
     """
     import json
     import logging
     from pathlib import Path as _Path
-    from app.config import get_settings as _get_settings2
-    _eff_url2 = _get_settings2().effective_database_url
-    db_path = _eff_url2.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
+    from sqlalchemy import text as _dtext
+    from app.db.database import AsyncSessionLocal as _ASL
     from app.rag.chunker import TextChunk, smart_chunk_pdf, extract_text_from_pdf
     from app.rag.classifier import classify_manual, extract_manual_version
     from app.rag.embedder import embed_chunks
@@ -681,28 +683,15 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log = logging.getLogger(__name__)
     settings = get_settings()
 
-    update_fn("CLASSIFYING")
-    log.info("[%s] Extracting text + chunking in parallel (both non-blocking)", manual_id)
+    await update_fn("CLASSIFYING")
 
-    # Both text extraction and chunking run in thread pool simultaneously
-    # extract_text_from_pdf is capped at 60 pages so it finishes in ~10s
-    chunk_task = asyncio.ensure_future(
-        asyncio.to_thread(
-            smart_chunk_pdf,
-            pdf_path,
-            pdf_path.name,
-            settings.rag_max_section_words,
-            settings.rag_min_section_words,
-            manual_id,
-            "",
-        )
-    )
-    text_task = asyncio.ensure_future(
-        asyncio.to_thread(extract_text_from_pdf, pdf_path)
-    )
-
-    # Wait for text extraction first (fast — 60-page cap), then classify
-    full_text, _offsets = await text_task
+    # Text extraction runs before chunk_task to avoid GIL contention.
+    # Parallel pdfplumber+pdfminer on large PDFs (e.g. TeM 30MB) both hold
+    # the GIL during zlib decompression for hundreds of ms per page, multiplying
+    # text extraction time up to 4x (84s → 300s+) and preventing CHUNKING from
+    # being written to the DB before the container health limit is reached.
+    log.info("[%s] Extracting text (60-page cap)", manual_id)
+    full_text, _offsets = await asyncio.to_thread(extract_text_from_pdf, pdf_path)
     sample_text = full_text[:15000]
 
     # Classify finishes in ~5s; wrap with timeout to prevent hanging on slow network
@@ -725,9 +714,46 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model)
     log.info("[%s] Inferred machine_id: %s", manual_id, inferred_machine_id or "none")
 
+    # Detect Tetra Pak before chunking — determines timeout strategy
+    is_tetra = any(k in (classification.manufacturer or "").upper() for k in ("TETRA", "TEM"))
+    log.info("[%s] is_tetra=%s manufacturer=%r", manual_id, is_tetra, classification.manufacturer)
+
+    # Start chunk_task now that text extraction is complete (no more GIL contention)
+    chunk_task = asyncio.ensure_future(
+        asyncio.to_thread(
+            smart_chunk_pdf,
+            pdf_path,
+            pdf_path.name,
+            settings.rag_max_section_words,
+            settings.rag_min_section_words,
+            manual_id,
+            "",
+        )
+    )
+
     # Update to CHUNKING — user sees the pipeline advance while the thread finishes
-    update_fn("CHUNKING")
-    chunks = await chunk_task
+    await update_fn("CHUNKING")
+    _chunking_used_fallback = False
+    # Tetra Pak PDFs (800+ pages) saturate the GIL in smart_chunk_pdf; PMRSPL
+    # handles their task extraction anyway, so fall back to sliding window in 20s.
+    _chunk_timeout = 20 if is_tetra else 90
+    try:
+        # Shield so a timeout doesn't block the event loop waiting for the thread.
+        # The underlying thread cannot be preempted; shield lets us fall back
+        # immediately while the thread finishes quietly in the background.
+        chunks = await asyncio.wait_for(asyncio.shield(chunk_task), timeout=_chunk_timeout)
+    except asyncio.TimeoutError:
+        _chunking_used_fallback = True
+        log.warning("[%s] Smart chunking timed out (%ds) — sliding window fallback", manual_id, _chunk_timeout)
+        from app.rag.chunker import chunk_text as _chunk_text
+        chunks = _chunk_text(full_text, str(pdf_path.name), page_offsets=_offsets)
+        log.info("[%s] Sliding window fallback: %d chunks", manual_id, len(chunks))
+    except Exception as _chunk_exc:
+        _chunking_used_fallback = True
+        log.warning("[%s] Smart chunking failed (%s) — sliding window fallback", manual_id, _chunk_exc)
+        from app.rag.chunker import chunk_text as _chunk_text
+        chunks = _chunk_text(full_text, str(pdf_path.name), page_offsets=_offsets)
+        log.info("[%s] Sliding window fallback: %d chunks", manual_id, len(chunks))
 
     type_summary = ', '.join(
         f'{t}={sum(1 for c in chunks if c.chunk_type == t)}'
@@ -735,17 +761,27 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     )
     log.info("[%s] Smart chunking: %d chunks (%s)", manual_id, len(chunks), type_summary)
 
-    update_fn("EMBEDDING")
+    await update_fn("EMBEDDING")
     from app.rag.pipeline import (
         _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
         _extract_pmrspl_direct, _assign_task_page_citations,
     )
 
-    # Tetra Pak PMRSPL direct path — bypasses AI; structured table has all data
-    is_tetra = any(k in (classification.manufacturer or "").upper() for k in ("TETRA", "TEM"))
+    # Tetra Pak PMRSPL direct path — bypasses AI; structured table has all data.
+    # is_tetra was computed before CHUNKING; always run PMRSPL for Tetra Pak even
+    # when chunking timed out, since sliding window chunks lack PMRSPL table data.
+    log.info("[%s] is_tetra=%s fallback=%s manufacturer=%r chunks=%d", manual_id, is_tetra, _chunking_used_fallback, classification.manufacturer, len(chunks))
     if is_tetra:
-        log.info("[%s] Tetra Pak detected — running PMRSPL direct extractor", manual_id)
-        extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
+        log.info("[%s] Tetra Pak: running PMRSPL direct extractor (shielded, 300s timeout)", manual_id)
+        _pmrspl_fut = asyncio.ensure_future(asyncio.to_thread(_extract_pmrspl_direct, pdf_path))
+        try:
+            extracted_tasks = await asyncio.wait_for(asyncio.shield(_pmrspl_fut), timeout=300)
+        except asyncio.TimeoutError:
+            log.warning("[%s] PMRSPL timed out (300s) — falling through to AI path", manual_id)
+            extracted_tasks = []
+        except Exception as _pe:
+            log.warning("[%s] PMRSPL failed: %s — falling through to AI path", manual_id, _pe)
+            extracted_tasks = []
         if extracted_tasks:
             log.info("[%s] PMRSPL direct: %d tasks", manual_id, len(extracted_tasks))
             for i, t in enumerate(extracted_tasks, 1):
@@ -754,7 +790,6 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             # Save one citation per task — each pointing to the exact PMRSPL page
             # where that task's row was extracted. chunk_id is unique per task so
             # the review UI can show a per-task citation with a clickable page number.
-            import sqlite3 as _sqlite3
             _pmrspl_citations = [
                 {
                     "manual_id": manual_id,
@@ -774,37 +809,42 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             ]
             if _pmrspl_citations:
                 try:
-                    _conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
-                    for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT"),
-                                       ("interval_hours", "INTEGER DEFAULT 0")):
-                        try:
-                            _conn.execute(f"ALTER TABLE citations ADD COLUMN {_col} {_typ}")
-                        except Exception:
-                            pass
-                    _conn.executemany(
-                        "INSERT OR IGNORE INTO citations "
-                        "(citation_id, manual_id, chunk_id, page_start, page_end, section, "
-                        "content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours) "
-                        "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?,?)",
-                        [(r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
-                          r["section"], r["content_type"], r["text_excerpt"],
-                          r["manual_version"], r["manufacturer"], r["machine_model"],
-                          r["interval_hours"])
-                         for r in _pmrspl_citations],
-                    )
-                    _conn.close()
+                    import uuid as _uuid
+                    async with _ASL() as _cdb:
+                        for _r in _pmrspl_citations:
+                            try:
+                                await _cdb.execute(
+                                    _dtext(
+                                        "INSERT INTO citations"
+                                        " (citation_id, manual_id, chunk_id, page_start, page_end, section,"
+                                        "  content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours)"
+                                        " VALUES (:cid,:mid,:ck,:ps,:pe,:sec,:ct,:tx,:mv,:mfr,:mm,:ih)"
+                                    ),
+                                    {
+                                        "cid": _uuid.uuid4().hex,
+                                        "mid": _r["manual_id"], "ck": _r["chunk_id"],
+                                        "ps": _r["page_start"], "pe": _r["page_end"],
+                                        "sec": _r["section"], "ct": _r["content_type"],
+                                        "tx": _r["text_excerpt"], "mv": _r["manual_version"],
+                                        "mfr": _r["manufacturer"], "mm": _r["machine_model"],
+                                        "ih": _r["interval_hours"],
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        await _cdb.commit()
                     log.info("[%s] Saved %d per-task PMRSPL citations", manual_id, len(_pmrspl_citations))
                 except Exception as _ce:
                     log.warning("[%s] PMRSPL citation DB write failed: %s", manual_id, _ce)
 
-            finalize_fn(
+            await finalize_fn(
                 json.dumps(extracted_tasks),
                 classification.manufacturer,
                 json.dumps(classification.detected_chapters or []),
                 inferred_machine_id,
             )
             return
-        log.warning("[%s] PMRSPL direct returned 0 tasks — falling through to AI path", manual_id)
+        log.warning("[%s] PMRSPL returned 0 tasks — falling through to AI path", manual_id)
 
     # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs)
     chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
@@ -813,6 +853,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
     others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
     embed_subset = (priority + others)[:200]
+    log.info("[%s] Calling embed_chunks with %d chunks (priority=%d others=%d)", manual_id, len(embed_subset), len(priority), len(others))
     embedded = await embed_chunks(embed_subset)
     log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
     if embedded:
@@ -835,11 +876,18 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         interval_hints=interval_hints,
     )
 
-    if not extracted_tasks:
+    if not extracted_tasks and not _chunking_used_fallback:
         log.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
-        extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
+        _table_fut = asyncio.ensure_future(asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path))
+        try:
+            extracted_tasks = await asyncio.wait_for(asyncio.shield(_table_fut), timeout=120)
+        except asyncio.TimeoutError:
+            log.warning("[%s] Table-based fallback timed out (120s) — skipping", manual_id)
+            extracted_tasks = []
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+    elif not extracted_tasks and _chunking_used_fallback:
+        log.warning("[%s] AI extraction returned 0 tasks — skipping table fallback (pdfplumber too slow for this PDF)", manual_id)
 
     # Mark AI-extracted tasks with source so UI can distinguish them
     for _t in extracted_tasks:
@@ -848,18 +896,19 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     # PM Library: always load and supplement AI results with intervals AI didn't cover.
     # Pure fallback if AI returned 0; supplement otherwise (adds 8hr daily checks,
     # 2000hr overhaul tasks, etc. that rarely appear as checkbox items in the PDF text).
-    import sqlite3 as _sq
     _lib_machine_id = inferred_machine_id
     if _lib_machine_id:
         try:
-            _conn2 = _sq.connect(db_path, timeout=30)
-            _lib_rows = _conn2.execute(
-                "SELECT task_no, area, action, description, machine_state, "
-                "safety_flag, part_number, interval_hours "
-                "FROM tasks WHERE machine_id=? ORDER BY interval_hours, task_no",
-                (_lib_machine_id,)
-            ).fetchall()
-            _conn2.close()
+            async with _ASL() as _db2:
+                _res2 = await _db2.execute(
+                    _dtext(
+                        "SELECT task_no, area, action, description, machine_state,"
+                        " safety_flag, part_number, interval_hours"
+                        " FROM tasks WHERE machine_id=:mid ORDER BY interval_hours, task_no"
+                    ),
+                    {"mid": _lib_machine_id},
+                )
+                _lib_rows = _res2.fetchall()
             if _lib_rows:
                 _lib_tasks = [
                     {
@@ -918,12 +967,13 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         import pdfplumber as _plumber
         _PM_KW = ("maintenance", "inspect", "replace", "check", "lubricate",
                   "interval", "hours", "service", "clean", "grease")
-        try:
+        def _scan_citations_sync():
+            records = []
             with _plumber.open(str(pdf_path)) as _pdf:
-                for _page in _pdf.pages:
+                for _page in _pdf.pages[:150]:
                     _txt = _page.extract_text() or ""
                     if any(kw in _txt.lower() for kw in _PM_KW):
-                        citation_records.append({
+                        records.append({
                             "manual_id": manual_id,
                             "chunk_id": f"fallback_p{_page.page_number}",
                             "page_start": _page.page_number,
@@ -935,36 +985,47 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                             "manufacturer": classification.manufacturer or "",
                             "machine_model": classification.model or "",
                         })
-                        if len(citation_records) >= 25:
+                        if len(records) >= 25:
                             break
+            return records
+        try:
+            citation_records = await asyncio.wait_for(
+                asyncio.to_thread(_scan_citations_sync),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            log.warning("[%s] Fallback citation scan timed out (60s) — skipping", manual_id)
         except Exception as _pe:
             log.warning("[%s] Fallback citation scan failed: %s", manual_id, _pe)
 
     if citation_records:
-        import sqlite3 as _sqlite3
+        import uuid as _uuid2
         try:
-            conn = _sqlite3.connect(db_path, timeout=30, isolation_level=None)
-            for _col, _typ in (("manufacturer", "TEXT"), ("machine_model", "TEXT"),
-                               ("interval_hours", "INTEGER DEFAULT 0")):
-                try:
-                    conn.execute(f"ALTER TABLE citations ADD COLUMN {_col} {_typ}")
-                except Exception:
-                    pass
-            conn.executemany(
-                "INSERT OR IGNORE INTO citations "
-                "(citation_id, manual_id, chunk_id, page_start, page_end, section, "
-                "content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours) "
-                "VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?,?,?,?)",
-                [
-                    (r["manual_id"], r["chunk_id"], r["page_start"], r["page_end"],
-                     r["section"], r["content_type"], r["text_excerpt"], r["manual_version"],
-                     r.get("manufacturer", ""), r.get("machine_model", ""),
-                     r.get("interval_hours", 0))
-                    for r in citation_records
-                ],
-            )
-            conn.close()
-            log.info("[%s] Saved %d citations (raw sqlite)", manual_id, len(citation_records))
+            async with _ASL() as _cdb2:
+                for r in citation_records:
+                    try:
+                        await _cdb2.execute(
+                            _dtext(
+                                "INSERT INTO citations"
+                                " (citation_id, manual_id, chunk_id, page_start, page_end, section,"
+                                "  content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours)"
+                                " VALUES (:cid,:mid,:ck,:ps,:pe,:sec,:ct,:tx,:mv,:mfr,:mm,:ih)"
+                            ),
+                            {
+                                "cid": _uuid2.uuid4().hex,
+                                "mid": r["manual_id"], "ck": r["chunk_id"],
+                                "ps": r["page_start"], "pe": r["page_end"],
+                                "sec": r["section"], "ct": r["content_type"],
+                                "tx": r["text_excerpt"], "mv": r["manual_version"],
+                                "mfr": r.get("manufacturer", ""),
+                                "mm": r.get("machine_model", ""),
+                                "ih": r.get("interval_hours", 0),
+                            },
+                        )
+                    except Exception:
+                        pass
+                await _cdb2.commit()
+            log.info("[%s] Saved %d citations", manual_id, len(citation_records))
         except Exception as ce:
             log.warning("[%s] Citation save failed: %s", manual_id, ce)
 
@@ -977,7 +1038,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     log.info("[%s] Extracted %d tasks — writing to DB", manual_id, len(extracted_tasks))
 
-    finalize_fn(
+    await finalize_fn(
         json.dumps(extracted_tasks),
         classification.manufacturer,
         json.dumps(classification.detected_chapters),

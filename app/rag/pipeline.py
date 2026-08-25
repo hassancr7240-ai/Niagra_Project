@@ -21,6 +21,22 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _safe_extract_tables(page, timeout_s: int = 5) -> list:
+    """
+    Call page.extract_tables() with a hard per-page timeout.
+    pdfplumber can hang indefinitely on complex PDF pages; this ensures
+    we always return within timeout_s seconds (returns [] on timeout/error).
+    """
+    import concurrent.futures
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(page.extract_tables).result(timeout=timeout_s) or []
+    except (concurrent.futures.TimeoutError, Exception):
+        return []
+    finally:
+        ex.shutdown(wait=False)
+
+
 async def run_pipeline(
     db: AsyncSession,
     manual_id: str,
@@ -574,7 +590,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 if "preventive maintenance recommendations" not in txt:
                     continue
                 # Verify this page has a qualifying PMRSPL table, not just a TOC entry
-                for table in (page.extract_tables() or []):
+                for table in _safe_extract_tables(page):
                     iv_col, action_col = _is_pmrspl_table(table)
                     if iv_col >= 0:
                         pmrspl_start = page.page_number - 1  # 0-based index
@@ -596,7 +612,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 consecutive_empty = 0
 
                 for page in pdf.pages[pmrspl_start + 1: pmrspl_start + 10]:
-                    tables = page.extract_tables() or []
+                    tables = _safe_extract_tables(page)
                     found_pmrspl_table = False
                     for table in tables:
                         if not table or len(table) < 2:
@@ -800,8 +816,8 @@ def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
     """
     raw: list[dict] = []
 
-    for page in pdf.pages:
-        for table in page.extract_tables():
+    for page in pdf.pages[:150]:
+        for table in _safe_extract_tables(page):
             if not table or len(table) < 2:
                 continue
 
@@ -878,8 +894,8 @@ def _try_generic_table(pdf, pdf_path: Path) -> list[dict]:
     """
     raw: list[dict] = []
 
-    for page in pdf.pages:
-        for table in page.extract_tables():
+    for page in pdf.pages[:150]:
+        for table in _safe_extract_tables(page):
             if not table:
                 continue
             for row in table:

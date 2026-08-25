@@ -8,6 +8,27 @@ from typing import Optional
 import pdfplumber
 
 
+_TABLE_TIMEOUT = object()  # sentinel — distinguishes "timed out" from "no tables on page"
+
+
+def _safe_extract_tables(page, timeout_s: int = 5):
+    """pdfplumber can hang on complex pages; this enforces a hard per-page timeout.
+
+    Returns list of tables on success, _TABLE_TIMEOUT sentinel on timeout,
+    or [] on other errors.
+    """
+    import concurrent.futures
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(page.extract_tables).result(timeout=timeout_s) or []
+    except concurrent.futures.TimeoutError:
+        return _TABLE_TIMEOUT  # caller uses this to circuit-break
+    except Exception:
+        return []
+    finally:
+        ex.shutdown(wait=False)
+
+
 # ── Data Model ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -138,7 +159,8 @@ _TABLE_SCAN_KW = frozenset({
     'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
     'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
 })
-_TABLE_PAGE_CAP = 300   # scan up to 300 pages — Variopac Pro maintenance starts at p213
+_TABLE_PAGE_CAP = 80       # section text scan — capped to match _TABLE_EXTRACT_CAP; prevents GIL saturation on large PDFs
+_TABLE_EXTRACT_CAP = 80   # table extraction — extract_tables() is slow on Azure B2 CPU
 
 
 def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:
@@ -152,8 +174,9 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
     """
     chunks: list[TextChunk] = []
     idx = 0
+    _consecutive_timeouts = 0
 
-    for page in pdf.pages[:_TABLE_PAGE_CAP]:
+    for page in pdf.pages[:_TABLE_EXTRACT_CAP]:
         pn = page.page_number
         # Fast gate: only run the slow extract_tables() on pages that
         # actually contain maintenance-related text.
@@ -164,7 +187,17 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
         # heading ABOVE the table ("Interval: Every 120 Operating Hours"), not inside cells
         page_interval = _detect_interval(page_text_lower)
 
-        for table in (page.extract_tables() or []):
+        table_result = _safe_extract_tables(page)
+        if table_result is _TABLE_TIMEOUT:
+            _consecutive_timeouts += 1
+            if _consecutive_timeouts >= 3:
+                # PDF is too complex for table extraction — abort to avoid GIL saturation
+                # from zombie threads competing with the asyncio event loop.
+                break
+            continue
+        _consecutive_timeouts = 0  # reset on any non-timeout result
+
+        for table in table_result:
             if not table or len(table) < 2:
                 continue
             max_cols = max((len(r) for r in table if r), default=0)

@@ -675,6 +675,24 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
         else:
             action_text = desc_upper
 
+        # Append a standard 1-line instruction so technicians know what to do,
+        # especially for PMRSPL tasks where description is a part code, not a sentence.
+        _ACTION_HINTS = {
+            "REPLACE":   "Remove old component. Install new part. Verify leak-free operation and correct function before restart.",
+            "CHECK":     "Inspect for condition, leaks, wear or damage. Record findings. Escalate if defective.",
+            "INSPECT":   "Visually inspect. Check alignment, fasteners and seals. Record findings. Escalate if defective.",
+            "CLEAN":     "Clean per procedure. Remove all debris. Verify cleanliness before reassembly.",
+            "LUBRICATE": "Apply specified lubricant to all grease points. Do not over-lubricate. Wipe excess.",
+            "LOCKOUT":   "Follow full LOTO procedure. Verify zero energy state before performing any work.",
+            "VERIFY":    "Verify correct operation, settings and parameter values. Adjust if out of spec.",
+            "TEST":      "Perform functional test. Record result. Investigate and resolve any failure.",
+            "CONFIRM":   "Confirm correct installation and operation. Sign off only when confirmed OK.",
+            "LISTEN":    "Listen for abnormal noise or vibration during operation. Record and report if detected.",
+        }
+        hint = _ACTION_HINTS.get(action_upper, "")
+        if hint and action_text and hint.upper() not in action_text:
+            action_text = f"{action_text}\n{hint}"
+
         _fmt_cell(ws, row, 1, task_no, align="right")
         _merge_box(ws, row, 2, 4)
         ws.cell(row=row, column=2, value=(area or "").upper())

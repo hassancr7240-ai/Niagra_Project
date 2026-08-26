@@ -519,6 +519,30 @@ async def generate_zip_download(
 
     zip_bytes, zip_filename = generate_con_l3_zip_bytes(effective_machine_id, machine_display_name, tasks)
 
+    # Save ZIP to Azure Blob Storage so it can be retrieved later without regenerating.
+    try:
+        from app.config import get_settings as _gs2
+        _s2 = _gs2()
+        if _s2.azure_storage_connection_string or _s2.azure_storage_account_name:
+            from azure.storage.blob import BlobServiceClient
+            from azure.identity import DefaultAzureCredential as _DAC2
+            _conn2 = _s2.azure_storage_connection_string
+            if _conn2:
+                _bsc2 = BlobServiceClient.from_connection_string(_conn2)
+            else:
+                _bsc2 = BlobServiceClient(
+                    account_url=f"https://{_s2.azure_storage_account_name}.blob.core.windows.net",
+                    credential=_DAC2(),
+                )
+            _blob_name = f"exports/{manual_id}/{zip_filename}"
+            _cc2 = _bsc2.get_container_client(_s2.azure_storage_container_name)
+            _cc2.upload_blob(name=_blob_name, data=zip_bytes, overwrite=True)
+            import logging as _log2
+            _log2.getLogger(__name__).info("ZIP saved to Blob: %s", _blob_name)
+    except Exception as _blob_err:
+        import logging as _log3
+        _log3.getLogger(__name__).warning("ZIP Blob save failed (non-fatal): %s", _blob_err)
+
     return Response(
         content=zip_bytes,
         media_type="application/zip",

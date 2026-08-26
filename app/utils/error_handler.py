@@ -4,7 +4,7 @@ import logging
 import traceback
 
 from fastapi import FastAPI, Request, status
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -41,9 +41,12 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(404)
     async def not_found_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Preserve the real detail from HTTPException (e.g. "Machine not found")
+        # and only fall back to the generic URL-based message for true route misses.
+        detail = getattr(exc, "detail", None) or f"Resource not found: {request.url.path}"
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"detail": f"Resource not found: {request.url.path}"},
+            content={"detail": detail},
         )
 
     @app.exception_handler(Exception)

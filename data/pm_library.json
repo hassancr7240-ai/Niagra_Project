@@ -57,6 +57,18 @@
       "asset_tag": "VAR-L3"
     },
     {
+      "machine_id": "TETRAPAK-ASEPTIC-L3",
+      "name": "Tetra Pak Aseptic Line 3",
+      "manufacturer": "Tetra Pak",
+      "model": "Aseptic L3",
+      "type": "THIRD_PARTY",
+      "maintenance_chapters": [],
+      "is_hour_based": false,
+      "description": "Tetra Pak aseptic filling machine — fills and seals carton packages under aseptic conditions on Line 3",
+      "location": "Line 3",
+      "asset_tag": "TP-L3"
+    },
+    {
       "machine_id": "SHRINK-TUNNEL-L3",
       "name": "Krones Shrinking Tunnel",
       "manufacturer": "Krones AG",

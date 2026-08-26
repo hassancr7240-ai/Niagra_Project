@@ -1585,6 +1585,37 @@ const _ivLabel = h => {
   return m[h] || `${h}HR`;
 };
 
+const _ACTION_HINTS = {
+  'REPLACE':   'Remove old component, install new part, verify leak-free operation and correct function before restart.',
+  'CHECK':     'Inspect for condition, leaks, wear or damage. Record findings and escalate if defective.',
+  'INSPECT':   'Visually inspect alignment, fasteners and seals. Record findings and escalate if defective.',
+  'CLEAN':     'Clean per procedure, remove all debris, verify cleanliness before reassembly.',
+  'LUBRICATE': 'Apply specified lubricant to all grease points. Do not over-lubricate — wipe any excess.',
+  'LOCKOUT':   'Follow full LOTO procedure and verify zero-energy state before performing any work.',
+  'VERIFY':    'Verify correct operation, settings and parameter values. Adjust if out of specification.',
+  'TEST':      'Perform functional test, record the result, and investigate any failure before restart.',
+  'CONFIRM':   'Confirm correct installation and operation. Sign off only when confirmed OK.',
+  'LISTEN':    'Listen for abnormal noise or vibration during operation. Record and report if detected.',
+};
+
+function _toTitleCase(str) {
+  return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function _buildActionText(action, description) {
+  const a = (action||'').trim().toUpperCase();
+  const d = (description||'').trim();
+  // Build base: e.g. "Replace non-return valve — CV102_10"
+  const dFormatted = _toTitleCase(d);
+  const base = (a && !dFormatted.toUpperCase().startsWith(a))
+    ? `${_toTitleCase(a)} ${dFormatted}`.trim()
+    : dFormatted;
+  // Append instruction hint for the leading verb
+  const verb = a.split(/\s+/)[0];
+  const hint = _ACTION_HINTS[verb] || '';
+  return hint ? `${base} — ${hint}` : base;
+}
+
 function _renderXlSheet(tasks, machineName) {
   if (!tasks || !tasks.length) {
     return '<div class="xl-sheet" style="padding:24px;text-align:center;color:var(--g400)">No tasks for this interval.</div>';
@@ -1595,14 +1626,12 @@ function _renderXlSheet(tasks, machineName) {
   const partsTasks = tasks.filter(t => t.part_number);
 
   const taskRows = tasks.map(t => {
-    const a = (t.action||'').toUpperCase().trim();
-    const d = (t.description||'').toUpperCase().trim();
-    const actionText = (a && !d.startsWith(a)) ? `${a} ${d}`.trim() : d;
+    const actionText = _buildActionText(t.action, t.description);
     return `
     <tr class="xl-task-row">
       <td class="xl-task-no" style="width:64px">${t.task_no||''}</td>
       <td class="xl-area" style="min-width:180px">${escHtml(t.area||'GENERAL')}</td>
-      <td style="min-width:300px;line-height:1.5">${escHtml(actionText)}</td>
+      <td style="min-width:300px;line-height:1.6;font-size:12px">${escHtml(actionText)}</td>
       <td style="width:56px">&nbsp;</td>
     </tr>`;
   }).join('');

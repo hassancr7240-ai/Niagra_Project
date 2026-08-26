@@ -770,7 +770,7 @@ td.td-section{font-size:11px;color:var(--g500);max-width:140px;line-height:1.4}
       <div id="excelPreviewContent"></div>
     </div>
     <div class="excel-modal-foot">
-      <span class="excel-modal-hint">Read-only preview · Action column is blank — technician fills in on site</span>
+      <span class="excel-modal-hint">Read-only preview — actions pre-filled from manual extraction</span>
       <div style="display:flex;gap:8px">
         <button class="btn btn-zip btn-sm" onclick="downloadZip();closeModal('excelPreviewModal')">⬇ Download ZIP</button>
         <button class="btn btn-outline btn-sm" onclick="closeModal('excelPreviewModal')">Close</button>
@@ -1594,13 +1594,18 @@ function _renderXlSheet(tasks, machineName) {
   const title = `CON L3  ${(machineName||'').toUpperCase()}  ${ivLbl} HOURS PM`;
   const partsTasks = tasks.filter(t => t.part_number);
 
-  const taskRows = tasks.map(t => `
+  const taskRows = tasks.map(t => {
+    const a = (t.action||'').toUpperCase().trim();
+    const d = (t.description||'').toUpperCase().trim();
+    const actionText = (a && !d.startsWith(a)) ? `${a} ${d}`.trim() : d;
+    return `
     <tr class="xl-task-row">
       <td class="xl-task-no" style="width:64px">${t.task_no||''}</td>
       <td class="xl-area" style="min-width:180px">${escHtml(t.area||'GENERAL')}</td>
-      <td class="xl-blank" style="min-width:220px">&nbsp;</td>
-      <td class="xl-blank" style="width:56px">&nbsp;</td>
-    </tr>`).join('');
+      <td style="min-width:300px;line-height:1.5">${escHtml(actionText)}</td>
+      <td style="width:56px">&nbsp;</td>
+    </tr>`;
+  }).join('');
 
   const partsHtml = partsTasks.length ? `
     <tr class="xl-empty-row"><td colspan="4"></td></tr>
@@ -1623,7 +1628,7 @@ function _renderXlSheet(tasks, machineName) {
         <tr class="xl-col-header">
           <th>Task #</th>
           <th>Function / Area</th>
-          <th>Action <span style="font-weight:400;opacity:.6">(technician fills in)</span></th>
+          <th>Action</th>
           <th>Initial</th>
         </tr>
         ${taskRows}

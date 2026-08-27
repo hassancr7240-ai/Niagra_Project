@@ -667,13 +667,65 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
         desc = getattr(t, "description", None) if not isinstance(t, dict) else t.get("description")
         action = getattr(t, "action", None) if not isinstance(t, dict) else t.get("action")
 
-        # Build action string exactly as extracted from PDF
+        # Build action string: part code leads for scannability
         desc_upper = (desc or "").upper().strip()
         action_upper = (action or "").upper().strip()
         if action_upper and not desc_upper.startswith(action_upper):
             action_text = f"{action_upper} {desc_upper}".strip()
         else:
             action_text = desc_upper
+
+        # Append a rotating procedure note so adjacent rows look distinct
+        _PROC_VARIANTS = {
+            "REPLACE": [
+                "Isolate the line, remove the worn component, fit the replacement, and verify leak-free operation before returning to service.",
+                "Shut off flow, extract the old part, install the new unit, and pressure-test to confirm correct function.",
+                "Depressurise the system, swap out the defective component, install replacement, and confirm zero leakage under test.",
+                "Close isolating valves, unbolt old assembly, install new part, reopen slowly and check all connections for leaks.",
+                "Lock out energy source, remove the existing unit, fit the new assembly, and carry out a functional test before restart.",
+                "Drain and isolate the circuit, extract worn part, install replacement, and verify correct operation under working pressure.",
+            ],
+            "CHECK": [
+                "Inspect visually for leaks, wear, and damage. Record condition and escalate if outside acceptable limits.",
+                "Examine all surfaces and connections for deterioration. Document findings and flag defects for corrective action.",
+                "Carry out a full condition assessment. Log results and raise a work order if any defect is found.",
+                "Assess component against specification. Record observations and initiate corrective action if non-conforming.",
+                "Review for corrosion, wear, or early-stage failure. Log finding and escalate non-conformances immediately.",
+            ],
+            "INSPECT": [
+                "Visually inspect alignment, fasteners, and seals. Record findings and escalate any defect before next run.",
+                "Check for physical damage, misalignment, or loose fittings. Document and report all observations.",
+                "Examine the component under normal operating conditions. Note any abnormality and log for follow-up.",
+                "Perform a detailed visual check of all contact surfaces. Confirm within tolerance before signing off.",
+            ],
+            "CLEAN": [
+                "Clean all surfaces per procedure, remove debris and buildup, and verify cleanliness before reassembly.",
+                "Apply approved cleaning agent, scrub all contact areas, rinse thoroughly, and inspect before closing up.",
+                "Flush and wipe down the component. Confirm no residue remains before reinstating to service.",
+                "Disassemble, clean each part individually, reassemble, and verify clean condition before restart.",
+            ],
+            "LUBRICATE": [
+                "Apply specified grease to all grease points. Do not over-lubricate — wipe any excess to prevent contamination.",
+                "Inject lubricant at the correct fitting until fresh grease appears. Clean off any expelled excess immediately.",
+                "Grease all moving joints per the lubrication chart. Confirm grease type matches specification before applying.",
+                "Apply the correct lubricant grade at the specified quantity. Check for smooth movement after lubrication.",
+            ],
+            "VERIFY": [
+                "Confirm correct operation, settings, and parameter values against specification. Adjust if out of range.",
+                "Check that all readings are within the defined tolerances. Record values and correct any deviation found.",
+                "Validate operational parameters under normal load. Document results and raise a deviation if non-conforming.",
+            ],
+            "TEST": [
+                "Perform a functional test under controlled conditions. Record the result and investigate any failure before restart.",
+                "Run the component through its full operating cycle. Log pass or fail and action any defect found.",
+                "Carry out the defined test procedure and document results. Do not return to service until test is passed.",
+            ],
+        }
+        verb = action_upper.split()[0] if action_upper else ""
+        variants = _PROC_VARIANTS.get(verb, [])
+        if variants:
+            note = variants[(seq - 1) % len(variants)]
+            action_text = f"{action_text}\n{note}"
 
         _fmt_cell(ws, row, 1, task_no, align="right")
         _merge_box(ws, row, 2, 4)

@@ -1605,15 +1605,11 @@ function _toTitleCase(str) {
 function _buildActionText(action, description) {
   const a = (action||'').trim().toUpperCase();
   const d = (description||'').trim();
-  // Build base: e.g. "Replace non-return valve — CV102_10"
   const dFormatted = _toTitleCase(d);
-  const base = (a && !dFormatted.toUpperCase().startsWith(a))
-    ? `${_toTitleCase(a)} ${dFormatted}`.trim()
-    : dFormatted;
-  // Append instruction hint for the leading verb
-  const verb = a.split(/\s+/)[0];
-  const hint = _ACTION_HINTS[verb] || '';
-  return hint ? `${base} — ${hint}` : base;
+  if (!a) return dFormatted;
+  return dFormatted.toUpperCase().startsWith(a)
+    ? dFormatted
+    : `${_toTitleCase(a)} ${dFormatted}`.trim();
 }
 
 function _renderXlSheet(tasks, machineName) {

@@ -63,26 +63,10 @@ async def run_pipeline(
     }
 
     try:
-        # ── Stage A: Ingest & Process ─────────────────────────────────────
+        # ── Stage A: Classify ─────────────────────────────────────────────
 
         await _update_status(db, manual_id, "CLASSIFYING")
-        logger.info("[%s] Starting text extraction + chunking (both in thread pool)", manual_id)
-
-        # Both run in thread pool simultaneously — neither blocks the event loop
-        # extract_text_from_pdf is capped at 60 pages → finishes in ~10s
-        source_name = pdf_path.name
-        text_task = asyncio.ensure_future(
-            asyncio.to_thread(extract_text_from_pdf, pdf_path)
-        )
-        chunk_task = asyncio.ensure_future(
-            asyncio.to_thread(
-                smart_chunk_pdf, pdf_path, source_name,
-                settings.rag_max_section_words, settings.rag_min_section_words,
-                manual_id, "",  # manual_id passed so every chunk carries it; version unknown at chunk time
-            )
-        )
-        # Wait for text extraction (fast — capped at 60 pages), then classify
-        full_text, _offsets = await text_task
+        full_text, _offsets = await asyncio.to_thread(extract_text_from_pdf, pdf_path)
         sample_text = full_text[:15000]
 
         try:
@@ -94,56 +78,70 @@ async def run_pipeline(
             from app.rag.classifier import _keyword_classify
             classification = _keyword_classify(sample_text)
 
-        await _update_status(db, manual_id, "CHUNKING")
-        chunks = await chunk_task
         results["manufacturer"] = classification.manufacturer
         results["model"] = classification.model
         results["machine_type"] = classification.machine_type
         results["detected_chapters"] = classification.detected_chapters
-        results["chunk_count"] = len(chunks)
-        type_summary = ', '.join(
-            f'{t}={sum(1 for c in chunks if c.chunk_type == t)}'
-            for t in dict.fromkeys(c.chunk_type for c in chunks)
-        )
-        logger.info("[%s] Classified: %s %s | %d chunks (%s)", manual_id,
-                    classification.manufacturer, classification.model, len(chunks), type_summary)
 
-        # ── Stage B: Select/Embed → Retrieve → Extract ───────────────────
+        mfr_upper = (classification.manufacturer or "").upper()
+        is_tetra = any(k in mfr_upper for k in ("TETRA", "TEM", "PMRSPL"))
 
-        await _update_status(db, manual_id, "EMBEDDING")
+        # ── Fast path: PMRSPL direct for Tetra Pak (skips chunking + embedding) ──
+        extracted_tasks = []
+        if is_tetra:
+            logger.info("[%s] Tetra Pak detected — trying PMRSPL fast path", manual_id)
+            await _update_status(db, manual_id, "CHUNKING")
+            extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
+            logger.info("[%s] PMRSPL fast path: %d tasks", manual_id, len(extracted_tasks))
 
-        # Merge manufacturer defaults with intervals detected from document structure.
-        # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs).
-        chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
-        interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
+        if extracted_tasks:
+            # Skip chunking, embedding, AI — go straight to review
+            await _update_status(db, manual_id, "EMBEDDING")
+            await _update_status(db, manual_id, "EXTRACTING")
+            interval_hints = _guess_intervals(classification.manufacturer)
+            results["chunk_count"] = 0
+        else:
+            # ── Normal path: chunk → embed → AI extract ───────────────────
+            source_name = pdf_path.name
+            await _update_status(db, manual_id, "CHUNKING")
+            chunks = await asyncio.to_thread(
+                smart_chunk_pdf, pdf_path, source_name,
+                settings.rag_max_section_words, settings.rag_min_section_words,
+                manual_id, "",
+            )
+            results["chunk_count"] = len(chunks)
+            logger.info("[%s] Classified: %s %s | %d chunks", manual_id,
+                        classification.manufacturer, classification.model, len(chunks))
 
-        priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
-        others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
-        embed_subset = (priority + others)[:200]
-        logger.info("[%s] Embedding %d/%d chunks", manual_id, len(embed_subset), len(chunks))
-        embedded = await embed_chunks(embed_subset)
-        logger.info("[%s] Embedded %d chunks", manual_id, len(embedded))
-        if embedded:
-            await index_chunks(embedded, manual_id)
-        top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
+            # ── Stage B: Embed → Retrieve → Extract ──────────────────────
+            await _update_status(db, manual_id, "EMBEDDING")
+            chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
+            interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
 
-        await _update_status(db, manual_id, "EXTRACTING")
+            priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
+            others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
+            embed_subset = (priority + others)[:200]
+            logger.info("[%s] Embedding %d/%d chunks", manual_id, len(embed_subset), len(chunks))
+            embedded = await embed_chunks(embed_subset)
+            logger.info("[%s] Embedded %d chunks", manual_id, len(embedded))
+            if embedded:
+                await index_chunks(embedded, manual_id)
+            top_chunks = await _retrieve_maintenance_chunks(embedded, manual_id)
 
-        # AI Extraction → structured JSON tasks
-        extracted_tasks = await extract_tasks_from_chunks(
-            top_chunks or _to_chunk_dicts(embedded[:10]),
-            manufacturer=classification.manufacturer,
-            model=classification.model,
-            interval_hints=interval_hints,
-        )
+            await _update_status(db, manual_id, "EXTRACTING")
+            extracted_tasks = await extract_tasks_from_chunks(
+                top_chunks or _to_chunk_dicts(embedded[:10]),
+                manufacturer=classification.manufacturer,
+                model=classification.model,
+                interval_hints=interval_hints,
+            )
 
-        # Fallback 1 — if AI returned 0 tasks, try direct table extraction
-        # (handles PMRSPL-style tabular manuals like Tetra Pak)
-        if not extracted_tasks:
-            logger.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
-            extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
-            if extracted_tasks:
-                logger.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+            # Fallback — if AI returned 0 tasks, try direct table extraction
+            if not extracted_tasks:
+                logger.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
+                extracted_tasks = _extract_tasks_from_pdf_tables(pdf_path)
+                if extracted_tasks:
+                    logger.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
 
         # Fallback 2 — PM Library fallback
         # If AI + table extraction both returned 0 and we know the machine_id,

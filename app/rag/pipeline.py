@@ -68,18 +68,27 @@ async def run_pipeline(
         await _update_status(db, manual_id, "CLASSIFYING")
         source_name = pdf_path.name
 
-        # Start text extraction and chunking in parallel — text finishes first (60-page cap)
-        text_task = asyncio.ensure_future(asyncio.to_thread(extract_text_from_pdf, pdf_path))
-        chunk_task = asyncio.ensure_future(
-            asyncio.to_thread(
-                smart_chunk_pdf, pdf_path, source_name,
-                settings.rag_max_section_words, settings.rag_min_section_words,
-                manual_id, "",
-            )
-        )
+        # Quick keyword check on filename to detect Tetra Pak BEFORE starting slow chunking
+        _fname_upper = pdf_path.name.upper()
+        _is_tetra_by_name = any(k in _fname_upper for k in ("TEM-", "TETRA", "PMRSPL", "ASEPTIC"))
 
-        full_text, _offsets = await text_task
+        full_text, _offsets = await asyncio.to_thread(extract_text_from_pdf, pdf_path)
         sample_text = full_text[:15000]
+
+        # If not detected by filename, also check first page text (fast keyword scan)
+        if not _is_tetra_by_name:
+            _is_tetra_by_name = any(k in sample_text.upper() for k in ("TETRA PAK", "PMRSPL", "ASEPTIC FILLING"))
+
+        # Only start the slow chunk thread for non-Tetra PDFs
+        chunk_task = None
+        if not _is_tetra_by_name:
+            chunk_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    smart_chunk_pdf, pdf_path, source_name,
+                    settings.rag_max_section_words, settings.rag_min_section_words,
+                    manual_id, "",
+                )
+            )
 
         try:
             classification = await asyncio.wait_for(
@@ -96,13 +105,12 @@ async def run_pipeline(
         results["detected_chapters"] = classification.detected_chapters
 
         mfr_upper = (classification.manufacturer or "").upper()
-        is_tetra = any(k in mfr_upper for k in ("TETRA", "TEM", "PMRSPL"))
+        is_tetra = _is_tetra_by_name or any(k in mfr_upper for k in ("TETRA", "TEM", "PMRSPL"))
 
-        # ── Fast path: PMRSPL direct for Tetra Pak (cancel chunking, skip embedding) ──
+        # ── Fast path: PMRSPL direct for Tetra Pak (chunking never started) ──
         extracted_tasks = []
         if is_tetra:
-            chunk_task.cancel()
-            logger.info("[%s] Tetra Pak detected — PMRSPL fast path (chunking cancelled)", manual_id)
+            logger.info("[%s] Tetra Pak — PMRSPL fast path (no chunking)", manual_id)
             await _update_status(db, manual_id, "CHUNKING")
             extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
             logger.info("[%s] PMRSPL fast path: %d tasks", manual_id, len(extracted_tasks))
@@ -115,6 +123,14 @@ async def run_pipeline(
         else:
             # ── Normal path: await chunk → embed → AI extract ─────────────
             await _update_status(db, manual_id, "CHUNKING")
+            if chunk_task is None:
+                chunk_task = asyncio.ensure_future(
+                    asyncio.to_thread(
+                        smart_chunk_pdf, pdf_path, source_name,
+                        settings.rag_max_section_words, settings.rag_min_section_words,
+                        manual_id, "",
+                    )
+                )
             chunks = await chunk_task
             results["chunk_count"] = len(chunks)
             logger.info("[%s] Classified: %s %s | %d chunks", manual_id,

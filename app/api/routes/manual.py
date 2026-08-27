@@ -312,30 +312,32 @@ async def approve_extracted_tasks(
     import uuid
     from datetime import datetime
     added_count = 0
+    skipped_count = 0
     for t in tasks:
         if not t.get("interval_hours"):
             continue
         try:
-            await crud.create_task(
-                db,
-                {
-                    "task_id": str(uuid.uuid4()),
-                    "machine_id": target_machine,
-                    "interval_hours": int(t["interval_hours"]),
-                    "task_no": int(t.get("task_no", (added_count + 1) * 10)),
-                    "area": str(t.get("area", "GENERAL"))[:64],
-                    "action": str(t.get("action", "CHECK"))[:64],
-                    "description": str(t.get("description", ""))[:2000],
-                    "machine_state": str(t.get("machine_state", "STOPPED")),
-                    "safety_flag": bool(t.get("safety_flag", False)),
-                    "part_number": t.get("part_number"),
-                    "source_chapter": f"RAG Extract — {upload.original_filename}",
-                    "source_section": "AI Extracted",
-                },
-            )
+            async with db.begin_nested():
+                await crud.create_task(
+                    db,
+                    {
+                        "task_id": str(uuid.uuid4()),
+                        "machine_id": target_machine,
+                        "interval_hours": int(t["interval_hours"]),
+                        "task_no": int(t.get("task_no", (added_count + 1) * 10)),
+                        "area": str(t.get("area", "GENERAL"))[:64],
+                        "action": str(t.get("action", "CHECK"))[:64],
+                        "description": str(t.get("description", ""))[:2000],
+                        "machine_state": str(t.get("machine_state", "STOPPED")),
+                        "safety_flag": bool(t.get("safety_flag", False)),
+                        "part_number": t.get("part_number"),
+                        "source_chapter": f"RAG Extract — {upload.original_filename}"[:64],
+                        "source_section": "AI Extracted",
+                    },
+                )
             added_count += 1
         except Exception:
-            pass
+            skipped_count += 1
 
     await crud.update_manual_upload(
         db,
@@ -363,6 +365,7 @@ async def approve_extracted_tasks(
         "manual_id": manual_id,
         "machine_id": target_machine,
         "tasks_added_to_library": added_count,
+        "tasks_skipped_duplicates": skipped_count,
         "status": "APPROVED",
     }
 

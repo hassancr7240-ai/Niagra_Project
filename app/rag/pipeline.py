@@ -68,20 +68,37 @@ async def run_pipeline(
         await _update_status(db, manual_id, "CLASSIFYING")
         source_name = pdf_path.name
 
-        # Quick keyword check on filename to detect Tetra Pak BEFORE starting slow chunking
+        # Filename-only Tetra Pak detection — no PDF open needed, instant
         _fname_upper = pdf_path.name.upper()
-        _is_tetra_by_name = any(k in _fname_upper for k in ("TEM-", "TETRA", "PMRSPL", "ASEPTIC"))
+        is_tetra = any(k in _fname_upper for k in ("TEM-", "TETRA", "PMRSPL", "ASEPTIC"))
 
-        full_text, _offsets = await asyncio.to_thread(extract_text_from_pdf, pdf_path)
-        sample_text = full_text[:15000]
-
-        # If not detected by filename, also check first page text (fast keyword scan)
-        if not _is_tetra_by_name:
-            _is_tetra_by_name = any(k in sample_text.upper() for k in ("TETRA PAK", "PMRSPL", "ASEPTIC FILLING"))
-
-        # Only start the slow chunk thread for non-Tetra PDFs
+        extracted_tasks = []
         chunk_task = None
-        if not _is_tetra_by_name:
+        top_chunks = []
+
+        if is_tetra:
+            # ── PMRSPL fast path: skip text extraction, chunking, embedding, AI ──
+            logger.info("[%s] Tetra Pak detected by filename — PMRSPL only, skipping all other steps", manual_id)
+            results["manufacturer"] = "Tetra Pak"
+            results["model"] = "Aseptic L3"
+            results["machine_type"] = "THIRD_PARTY"
+            results["detected_chapters"] = []
+            results["chunk_count"] = 0
+            await _update_status(db, manual_id, "CHUNKING")
+            extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
+            logger.info("[%s] PMRSPL: %d tasks", manual_id, len(extracted_tasks))
+            if extracted_tasks:
+                await _update_status(db, manual_id, "EMBEDDING")
+                await _update_status(db, manual_id, "EXTRACTING")
+            interval_hints = _guess_intervals("TETRA PAK")
+            classification = type("C", (), {
+                "manufacturer": "Tetra Pak", "model": "Aseptic L3",
+                "machine_type": "THIRD_PARTY", "detected_chapters": [],
+            })()
+
+        if not is_tetra or not extracted_tasks:
+            # ── Normal path: text extract → classify → chunk → embed → AI ──
+            text_task = asyncio.ensure_future(asyncio.to_thread(extract_text_from_pdf, pdf_path))
             chunk_task = asyncio.ensure_future(
                 asyncio.to_thread(
                     smart_chunk_pdf, pdf_path, source_name,
@@ -89,48 +106,24 @@ async def run_pipeline(
                     manual_id, "",
                 )
             )
+            full_text, _offsets = await text_task
+            sample_text = full_text[:15000]
 
-        try:
-            classification = await asyncio.wait_for(
-                classify_manual(pdf_path, sample_text), timeout=30
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[%s] Classification timed out — using keyword fallback", manual_id)
-            from app.rag.classifier import _keyword_classify
-            classification = _keyword_classify(sample_text)
-
-        results["manufacturer"] = classification.manufacturer
-        results["model"] = classification.model
-        results["machine_type"] = classification.machine_type
-        results["detected_chapters"] = classification.detected_chapters
-
-        mfr_upper = (classification.manufacturer or "").upper()
-        is_tetra = _is_tetra_by_name or any(k in mfr_upper for k in ("TETRA", "TEM", "PMRSPL"))
-
-        # ── Fast path: PMRSPL direct for Tetra Pak (chunking never started) ──
-        extracted_tasks = []
-        if is_tetra:
-            logger.info("[%s] Tetra Pak — PMRSPL fast path (no chunking)", manual_id)
-            await _update_status(db, manual_id, "CHUNKING")
-            extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
-            logger.info("[%s] PMRSPL fast path: %d tasks", manual_id, len(extracted_tasks))
-
-        if extracted_tasks:
-            await _update_status(db, manual_id, "EMBEDDING")
-            await _update_status(db, manual_id, "EXTRACTING")
-            interval_hints = _guess_intervals(classification.manufacturer)
-            results["chunk_count"] = 0
-        else:
-            # ── Normal path: await chunk → embed → AI extract ─────────────
-            await _update_status(db, manual_id, "CHUNKING")
-            if chunk_task is None:
-                chunk_task = asyncio.ensure_future(
-                    asyncio.to_thread(
-                        smart_chunk_pdf, pdf_path, source_name,
-                        settings.rag_max_section_words, settings.rag_min_section_words,
-                        manual_id, "",
-                    )
+            try:
+                classification = await asyncio.wait_for(
+                    classify_manual(pdf_path, sample_text), timeout=30
                 )
+            except asyncio.TimeoutError:
+                logger.warning("[%s] Classification timed out — using keyword fallback", manual_id)
+                from app.rag.classifier import _keyword_classify
+                classification = _keyword_classify(sample_text)
+
+            results["manufacturer"] = classification.manufacturer
+            results["model"] = classification.model
+            results["machine_type"] = classification.machine_type
+            results["detected_chapters"] = classification.detected_chapters
+
+            await _update_status(db, manual_id, "CHUNKING")
             chunks = await chunk_task
             results["chunk_count"] = len(chunks)
             logger.info("[%s] Classified: %s %s | %d chunks", manual_id,

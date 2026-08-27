@@ -66,7 +66,19 @@ async def run_pipeline(
         # ── Stage A: Classify ─────────────────────────────────────────────
 
         await _update_status(db, manual_id, "CLASSIFYING")
-        full_text, _offsets = await asyncio.to_thread(extract_text_from_pdf, pdf_path)
+        source_name = pdf_path.name
+
+        # Start text extraction and chunking in parallel — text finishes first (60-page cap)
+        text_task = asyncio.ensure_future(asyncio.to_thread(extract_text_from_pdf, pdf_path))
+        chunk_task = asyncio.ensure_future(
+            asyncio.to_thread(
+                smart_chunk_pdf, pdf_path, source_name,
+                settings.rag_max_section_words, settings.rag_min_section_words,
+                manual_id, "",
+            )
+        )
+
+        full_text, _offsets = await text_task
         sample_text = full_text[:15000]
 
         try:
@@ -86,29 +98,24 @@ async def run_pipeline(
         mfr_upper = (classification.manufacturer or "").upper()
         is_tetra = any(k in mfr_upper for k in ("TETRA", "TEM", "PMRSPL"))
 
-        # ── Fast path: PMRSPL direct for Tetra Pak (skips chunking + embedding) ──
+        # ── Fast path: PMRSPL direct for Tetra Pak (cancel chunking, skip embedding) ──
         extracted_tasks = []
         if is_tetra:
-            logger.info("[%s] Tetra Pak detected — trying PMRSPL fast path", manual_id)
+            chunk_task.cancel()
+            logger.info("[%s] Tetra Pak detected — PMRSPL fast path (chunking cancelled)", manual_id)
             await _update_status(db, manual_id, "CHUNKING")
             extracted_tasks = await asyncio.to_thread(_extract_pmrspl_direct, pdf_path)
             logger.info("[%s] PMRSPL fast path: %d tasks", manual_id, len(extracted_tasks))
 
         if extracted_tasks:
-            # Skip chunking, embedding, AI — go straight to review
             await _update_status(db, manual_id, "EMBEDDING")
             await _update_status(db, manual_id, "EXTRACTING")
             interval_hints = _guess_intervals(classification.manufacturer)
             results["chunk_count"] = 0
         else:
-            # ── Normal path: chunk → embed → AI extract ───────────────────
-            source_name = pdf_path.name
+            # ── Normal path: await chunk → embed → AI extract ─────────────
             await _update_status(db, manual_id, "CHUNKING")
-            chunks = await asyncio.to_thread(
-                smart_chunk_pdf, pdf_path, source_name,
-                settings.rag_max_section_words, settings.rag_min_section_words,
-                manual_id, "",
-            )
+            chunks = await chunk_task
             results["chunk_count"] = len(chunks)
             logger.info("[%s] Classified: %s %s | %d chunks", manual_id,
                         classification.manufacturer, classification.model, len(chunks))

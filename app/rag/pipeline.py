@@ -68,9 +68,10 @@ async def run_pipeline(
         await _update_status(db, manual_id, "CLASSIFYING")
         source_name = pdf_path.name
 
-        # Filename-only Tetra Pak detection — no PDF open needed, instant
+        # Filename-only fast detection — no PDF open needed, instant
         _fname_upper = pdf_path.name.upper()
         is_tetra = any(k in _fname_upper for k in ("TEM-", "TETRA", "PMRSPL", "ASEPTIC"))
+        is_hypet = any(k in _fname_upper for k in ("HYPET", "HPET", "HY_PET", "HPP5E", "HYPET5"))
 
         extracted_tasks = []
         chunk_task = None
@@ -96,7 +97,27 @@ async def run_pipeline(
                 "machine_type": "THIRD_PARTY", "detected_chapters": [],
             })()
 
-        if not is_tetra or not extracted_tasks:
+        elif is_hypet:
+            # ── HyPET fast path: load from bundled reference Excel, skip all AI ──
+            logger.info("[%s] HyPET 5e detected by filename — loading from reference Excel", manual_id)
+            results["manufacturer"] = "Husky"
+            results["model"] = "HyPET 5e / HPP5e"
+            results["machine_type"] = "INJECTION_MOLDING"
+            results["detected_chapters"] = []
+            results["chunk_count"] = 0
+            await _update_status(db, manual_id, "CHUNKING")
+            extracted_tasks = await asyncio.to_thread(_extract_hypet_direct)
+            logger.info("[%s] HyPET reference: %d tasks", manual_id, len(extracted_tasks))
+            if extracted_tasks:
+                await _update_status(db, manual_id, "EMBEDDING")
+                await _update_status(db, manual_id, "EXTRACTING")
+            interval_hints = list(_HYPET_CALENDAR_TO_HOURS.values())
+            classification = type("C", (), {
+                "manufacturer": "Husky", "model": "HyPET 5e / HPP5e",
+                "machine_type": "INJECTION_MOLDING", "detected_chapters": [],
+            })()
+
+        if (not is_tetra and not is_hypet) or not extracted_tasks:
             # ── Normal path: text extract → classify → chunk → embed → AI ──
             text_task = asyncio.ensure_future(asyncio.to_thread(extract_text_from_pdf, pdf_path))
             chunk_task = asyncio.ensure_future(
@@ -662,6 +683,85 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
     return tasks
 
 
+# Calendar interval label → approximate operating hours (for DB storage)
+_HYPET_CALENDAR_TO_HOURS = {
+    "WEEKLY": 160, "2 WEEK": 320, "MONTHLY": 640, "2 MONTH": 1280,
+    "QUARTERLY": 2000, "4 MONTH": 2560, "SEMI ANNUAL": 3840,
+    "ANNUAL": 8000, "18 MONTH": 13000, "2 YEAR": 16000,
+    "3 YEAR": 24000, "4 YEAR": 32000,
+}
+
+_HYPET_VERBS = {
+    "CHECK", "INSPECT", "CLEAN", "LUBRICATE", "REPLACE", "DRAIN",
+    "VERIFY", "TEST", "ADJUST", "TORQUE", "EMPTY", "REMOVE", "INSTALL",
+    "REPLACING", "PERFORM", "EXAMINE", "FILL", "CHANGE",
+}
+
+
+def _extract_hypet_direct() -> list[dict]:
+    """
+    Load HyPET 5e PM tasks from the bundled reference Excel
+    (manager-validated, calendar-based schedule).
+    Returns tasks with interval_hours mapped to approximate operating hours
+    so the existing DB schema and ZIP generator work unchanged.
+    """
+    from openpyxl import load_workbook as _load_wb
+    ref_path = Path(__file__).parent.parent / "data" / "hypet_reference.xlsx"
+    if not ref_path.exists():
+        logger.warning("hypet_reference.xlsx not found at %s", ref_path)
+        return []
+
+    def _parse_area(desc: str):
+        if not desc:
+            return ("", "")
+        words = desc.strip().split()
+        first = words[0].upper().rstrip(":")
+        if first in _HYPET_VERBS and len(words) > 1:
+            return (" ".join(words[1:]).strip(), first)
+        return (desc.strip(), "")
+
+    tasks = []
+    task_no = 10
+    try:
+        wb = _load_wb(str(ref_path), data_only=True)
+        for sheet_name in wb.sheetnames:
+            hours = _HYPET_CALENDAR_TO_HOURS.get(sheet_name.strip().upper())
+            if hours is None:
+                continue
+            ws = wb[sheet_name]
+            # Find header row
+            data_start = 2
+            for r in range(1, 5):
+                v = ws.cell(row=r, column=1).value
+                if v and str(v).strip().lower() == "seq":
+                    data_start = r + 1
+                    break
+            for row in ws.iter_rows(min_row=data_start, values_only=True):
+                desc_short = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+                desc_long  = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                if not desc_short and not desc_long:
+                    continue
+                area, action_verb = _parse_area(desc_short)
+                is_safety = desc_short.strip().upper() == "SAFETY"
+                tasks.append({
+                    "task_no": task_no,
+                    "area": area or desc_short,
+                    "action": action_verb or "CHECK",
+                    "description": desc_long or desc_short,
+                    "interval_hours": hours,
+                    "machine_state": "STOPPED",
+                    "safety_flag": is_safety,
+                    "part_number": None,
+                    "source_chapter": f"HyPET Reference PM — {sheet_name}",
+                })
+                task_no += 10
+    except Exception as exc:
+        logger.error("HyPET direct extraction failed: %s", exc)
+
+    logger.info("HyPET direct: %d tasks loaded from reference Excel", len(tasks))
+    return tasks
+
+
 def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
     """
     Generalized fallback extractor: parse PM tables from any PDF format.
@@ -698,7 +798,8 @@ _INTERVAL_HEADERS = {"interval", "intervall", "frequency", "frequenz", "cycle",
 _ACTION_HEADERS   = {"action", "aktion", "work", "task", "operation", "activity",
                      "maintenance", "wartung"}
 _DESC_HEADERS     = {"description", "beschreibung", "detail", "instruction",
-                     "specification", "work description", "comment", "remarks"}
+                     "specification", "work description", "comment", "remarks",
+                     "procedure", "procedures", "task description", "work order"}
 _AREA_HEADERS     = {"component", "area", "system", "location", "part",
                      "equipment", "assembly", "group", "bauteil"}
 
@@ -822,15 +923,40 @@ def _finalize(raw: list[dict]) -> list[dict]:
 
 # ── Strategy 1: header-row column detection ───────────────────────────────────
 
+_PM_PAGE_KEYWORDS = re.compile(
+    r"maintenance schedule|preventive maintenance|service interval|lubrication schedule"
+    r"|pm interval|pm schedule|wartungsplan|wartungsintervall"
+    r"|\b500\s*h|\b1000\s*h|\b2000\s*h|\b4000\s*h|\b2,500\s*h|\binterval",
+    re.IGNORECASE,
+)
+
+
+def _pm_candidate_pages(pdf) -> list:
+    """
+    Two-pass: quick text scan to find pages with PM schedule keywords,
+    then return only those pages (plus ±2 neighbours) for table extraction.
+    Falls back to full PDF if no candidates found.
+    """
+    candidates: set[int] = set()
+    for i, page in enumerate(pdf.pages):
+        txt = page.extract_text() or ""
+        if _PM_PAGE_KEYWORDS.search(txt):
+            for nb in range(max(0, i - 1), min(len(pdf.pages), i + 3)):
+                candidates.add(nb)
+    if not candidates:
+        return pdf.pages  # no keyword match — scan all (slow but safe)
+    return [pdf.pages[i] for i in sorted(candidates)]
+
+
 def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
     """
     Scan every table for a header row containing interval/action/description
     keywords. Once found, use those column indices to parse all subsequent rows.
-    Works for PMRSPL (Tetra Pak), German Krones service lists, etc.
+    Works for PMRSPL (Tetra Pak), German Krones service lists, Husky HyPET, etc.
     """
     raw: list[dict] = []
 
-    for page in pdf.pages[:150]:
+    for page in _pm_candidate_pages(pdf):
         for table in _safe_extract_tables(page):
             if not table or len(table) < 2:
                 continue
@@ -859,6 +985,7 @@ def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
                 continue
 
             # Parse data rows after the header
+            last_interval: int | None = None  # carry forward for continuation rows
             for row in table[hdr_idx + 1:]:
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
@@ -871,11 +998,26 @@ def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
                     # Use unified interval detection — handles "45,000 h", "every 7 years",
                     # "> 3 months", German formats, etc.
                     interval = _chunk_detect_interval(interval_raw)
+                    if interval is None and interval_raw:
+                        # Column header already identified as interval — try plain numeric
+                        # (some formats like Husky HyPET have just "2,500" with no unit suffix)
+                        try:
+                            cleaned = re.sub(r"[,\s]", "", interval_raw.split("\n")[0])
+                            iv_int = int(cleaned)
+                            if 8 <= iv_int <= 50000:
+                                interval = iv_int
+                        except (ValueError, TypeError):
+                            pass
+                    if interval is None:
+                        # Continuation row (e.g. HyPET has None in interval cell for rows
+                        # that share the interval of the row above)
+                        interval = last_interval
                     if interval is None:
                         continue
                     interval = _snap_interval(interval)
                     if interval < 8:
                         continue
+                    last_interval = interval
 
                     action_verb = _detect_action_verb(action_raw)
                     area = _detect_area(area_raw or desc_raw) if not area_raw else area_raw.upper()[:30]
@@ -908,7 +1050,7 @@ def _try_generic_table(pdf, pdf_path: Path) -> list[dict]:
     """
     raw: list[dict] = []
 
-    for page in pdf.pages[:150]:
+    for page in _pm_candidate_pages(pdf):
         for table in _safe_extract_tables(page):
             if not table:
                 continue

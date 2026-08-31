@@ -741,9 +741,14 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model)
     log.info("[%s] Inferred machine_id: %s", manual_id, inferred_machine_id or "none")
 
-    # Detect Tetra Pak before chunking — determines timeout strategy
+    # Detect fast-path machines by filename + classifier — determines timeout strategy
+    _fname_upper_m = pdf_path.name.upper()
     is_tetra = any(k in (classification.manufacturer or "").upper() for k in ("TETRA", "TEM"))
-    log.info("[%s] is_tetra=%s manufacturer=%r", manual_id, is_tetra, classification.manufacturer)
+    is_hypet = (
+        any(k in _fname_upper_m for k in ("HYPET", "HPET", "HPP5E", "HYPET5"))
+        or any(k in (classification.manufacturer or "").upper() for k in ("HUSKY", "HYPET"))
+    )
+    log.info("[%s] is_tetra=%s is_hypet=%s manufacturer=%r", manual_id, is_tetra, is_hypet, classification.manufacturer)
 
     # Start chunk_task now that text extraction is complete (no more GIL contention)
     chunk_task = asyncio.ensure_future(
@@ -763,7 +768,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     _chunking_used_fallback = False
     # Tetra Pak PDFs (800+ pages) saturate the GIL in smart_chunk_pdf; PMRSPL
     # handles their task extraction anyway, so fall back to sliding window in 20s.
-    _chunk_timeout = 20 if is_tetra else 90
+    _chunk_timeout = 20 if (is_tetra or is_hypet) else 90
     try:
         # Shield so a timeout doesn't block the event loop waiting for the thread.
         # The underlying thread cannot be preempted; shield lets us fall back
@@ -791,7 +796,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     await update_fn("EMBEDDING")
     from app.rag.pipeline import (
         _guess_intervals, _extract_tasks_from_pdf_tables, _validate_task_citations,
-        _extract_pmrspl_direct, _assign_task_page_citations,
+        _extract_pmrspl_direct, _assign_task_page_citations, _extract_hypet_direct,
     )
 
     # Tetra Pak PMRSPL direct path — bypasses AI; structured table has all data.
@@ -873,6 +878,31 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             return
         log.warning("[%s] PMRSPL returned 0 tasks — falling through to AI path", manual_id)
 
+    # ── HyPET fast path: load from bundled reference Excel, no AI needed ──────
+    if is_hypet:
+        log.info("[%s] HyPET 5e: loading tasks from reference Excel (shielded, 30s timeout)", manual_id)
+        _hypet_fut = asyncio.ensure_future(asyncio.to_thread(_extract_hypet_direct))
+        try:
+            extracted_tasks = await asyncio.wait_for(asyncio.shield(_hypet_fut), timeout=30)
+        except asyncio.TimeoutError:
+            log.warning("[%s] HyPET direct timed out — falling through to AI path", manual_id)
+            extracted_tasks = []
+        except Exception as _he:
+            log.warning("[%s] HyPET direct failed: %s — falling through to AI path", manual_id, _he)
+            extracted_tasks = []
+        if extracted_tasks:
+            log.info("[%s] HyPET direct: %d tasks", manual_id, len(extracted_tasks))
+            for i, t in enumerate(extracted_tasks, 1):
+                t["task_no"] = i * 10
+            await finalize_fn(
+                json.dumps(extracted_tasks),
+                "Husky",
+                json.dumps([]),
+                inferred_machine_id or "HYPET5E-L3",
+            )
+            return
+        log.warning("[%s] HyPET returned 0 tasks — falling through to AI path", manual_id)
+
     # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs)
     chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
     interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
@@ -883,6 +913,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] Calling embed_chunks with %d chunks (priority=%d others=%d)", manual_id, len(embed_subset), len(priority), len(others))
     embedded = await embed_chunks(embed_subset)
     log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
+    _embedding_failed = len(embedded) == 0 and len(embed_subset) > 0
+    if _embedding_failed:
+        log.warning("[%s] Embedding returned 0 — watsonx may be unavailable (403/quota). Skipping AI extraction.", manual_id)
     if embedded:
         await index_chunks(embedded, manual_id)
     proxy = next(
@@ -896,15 +929,19 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                        "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
                       for e in embedded[:10]]
 
-    extracted_tasks = await extract_tasks_from_chunks(
-        top_chunks,
-        manufacturer=classification.manufacturer,
-        model=classification.model,
-        interval_hints=interval_hints,
-    )
+    if not _embedding_failed:
+        extracted_tasks = await extract_tasks_from_chunks(
+            top_chunks,
+            manufacturer=classification.manufacturer,
+            model=classification.model,
+            interval_hints=interval_hints,
+        )
+    else:
+        extracted_tasks = []
 
-    if not extracted_tasks and not _chunking_used_fallback:
-        log.warning("[%s] AI extraction returned 0 tasks — trying table-based fallback", manual_id)
+    # Table fallback: run whenever AI returned 0, regardless of chunking fallback
+    if not extracted_tasks:
+        log.warning("[%s] AI returned 0 tasks — trying table-based fallback", manual_id)
         _table_fut = asyncio.ensure_future(asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path))
         try:
             extracted_tasks = await asyncio.wait_for(asyncio.shield(_table_fut), timeout=120)
@@ -913,8 +950,6 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             extracted_tasks = []
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
-    elif not extracted_tasks and _chunking_used_fallback:
-        log.warning("[%s] AI extraction returned 0 tasks — skipping table fallback (pdfplumber too slow for this PDF)", manual_id)
 
     # Mark AI-extracted tasks with source so UI can distinguish them
     for _t in extracted_tasks:

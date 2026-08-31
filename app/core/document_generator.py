@@ -561,6 +561,10 @@ _INTERVAL_LABELS = {
     1500: "1500hr (Quarterly)", 3000: "3000hr (6-Month)", 4000: "4000hr (6-Month)",
     6000: "6000hr (Annual)", 12000: "12000hr (2-Year)", 18000: "18000hr (3-Year)",
     30000: "30000hr (5-Year)", 42000: "42000hr (7-Year)", 45000: "45000hr",
+    # HyPET calendar-based intervals
+    160: "WEEKLY", 320: "2 WEEK", 640: "MONTHLY", 1280: "2 MONTH",
+    2000: "QUARTERLY", 2560: "4 MONTH", 3840: "SEMI ANNUAL", 8000: "ANNUAL",
+    13000: "18 MONTH", 16000: "2 YEAR", 24000: "3 YEAR", 32000: "4 YEAR",
 }
 
 
@@ -575,6 +579,10 @@ _INTERVAL_FILE_LABELS = {
     1500: "1500hr_Quarterly", 3000: "3000hr_6-Month", 4000: "4000hr_6-Month",
     6000: "6000hr_Annual", 12000: "12000hr_2-Year", 18000: "18000hr_3-Year",
     30000: "30000hr_5-Year", 42000: "42000hr_7-Year", 45000: "45000hr",
+    # HyPET calendar-based intervals
+    160: "WEEKLY", 320: "2_WEEK", 640: "MONTHLY", 1280: "2_MONTH",
+    2000: "QUARTERLY", 2560: "4_MONTH", 3840: "SEMI_ANNUAL", 8000: "ANNUAL",
+    13000: "18_MONTH", 16000: "2_YEAR", 24000: "3_YEAR", 32000: "4_YEAR",
 }
 
 
@@ -619,7 +627,8 @@ def _merge_box(ws, row, col_start, col_end, row_end=None):
 
 def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
                       interval_hours=None, work_order=None,
-                      technician_name=None, generated_at=None):
+                      technician_name=None, generated_at=None,
+                      title_label=None):
     """
     Renders the CON L3 <MACHINE> <HOURS> HOURS PM format exactly:
       Row 1        : Asset Activity: | title | Description: | title
@@ -630,12 +639,16 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
                      Issued Qty(F) | Pick Location(G) | blank(H) | Mechanic(I:J)
       footer       : Actual start/end date, Comments, Team Member(s)
       last row     : **** END OF REPORT ****  (centered, full width)
+    title_label: when provided, replaces "N HOURS" in the title (e.g. "WEEKLY")
     """
     hours = interval_hours or 0
     _set_col_widths(ws)
     ws.sheet_view.showGridLines = False
 
-    title = f"CON L3 {machine_name.upper()} {hours} HOURS PM"
+    if title_label:
+        title = f"CON L3 {machine_name.upper()} {title_label.upper()} PM"
+    else:
+        title = f"CON L3 {machine_name.upper()} {hours} HOURS PM"
 
     # Row 1 -- title bar
     _fmt_cell(ws, 1, 1, "Asset Activity:", align="right")
@@ -843,6 +856,7 @@ _MACHINE_CON_L3: dict[str, tuple[str, str]] = {
     'SHRINK-TUNNEL-L3':  ('KRONES SHRINK TUNNEL',          'Shrink_Tunnel_KRONES'),
     'BOTTLECODER-L3':    ('BOTTLE CODER',                  'CON_L3_Bottle_Coder'),
     'TETRAPAK-ASEPTIC-L3': ('TETRA PAK ASEPTIC TANK',     'Tetra_Pak_Aseptic_Tank'),
+    'HYPET5E-L3':        ('HUSKY HYPET 5E',                'Husky_HyPET_5E'),
 }
 
 
@@ -884,8 +898,10 @@ def generate_con_l3_zip_bytes(machine_id: str, machine_display_name: str, tasks:
             wb = Workbook()
             ws = wb.active
             ws.title = label.upper()[:31]
+            # Use calendar label as title when interval maps to a calendar name (no "hr")
+            title_lbl = label if "hr" not in label.lower() else None
             _write_xlsx_sheet(ws, con_l3_name, label, by_interval[interval],
-                              interval_hours=interval)
+                              interval_hours=interval, title_label=title_lbl)
             wb_bytes_buf = io.BytesIO()
             wb.save(wb_bytes_buf)
             zf.writestr(xlsx_name, wb_bytes_buf.getvalue())

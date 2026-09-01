@@ -718,7 +718,13 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     # text extraction time up to 4x (84s → 300s+) and preventing CHUNKING from
     # being written to the DB before the container health limit is reached.
     log.info("[%s] Extracting text (60-page cap)", manual_id)
-    full_text, _offsets = await asyncio.to_thread(extract_text_from_pdf, pdf_path)
+    try:
+        full_text, _offsets = await asyncio.wait_for(
+            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=60
+        )
+    except (asyncio.TimeoutError, Exception) as _te:
+        log.warning("[%s] Text extraction failed/timed out: %s — using empty text", manual_id, _te)
+        full_text, _offsets = "", {}
     sample_text = full_text[:15000]
 
     # Classify finishes in ~5s; wrap with timeout to prevent hanging on slow network

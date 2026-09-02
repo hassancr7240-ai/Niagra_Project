@@ -712,19 +712,34 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     await update_fn("CLASSIFYING")
 
-    # Text extraction runs before chunk_task to avoid GIL contention.
-    # Parallel pdfplumber+pdfminer on large PDFs (e.g. TeM 30MB) both hold
-    # the GIL during zlib decompression for hundreds of ms per page, multiplying
-    # text extraction time up to 4x (84s → 300s+) and preventing CHUNKING from
-    # being written to the DB before the container health limit is reached.
-    log.info("[%s] Extracting text (60-page cap)", manual_id)
-    try:
-        full_text, _offsets = await asyncio.wait_for(
-            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=60
-        )
-    except (asyncio.TimeoutError, Exception) as _te:
-        log.warning("[%s] Text extraction failed/timed out: %s — using empty text", manual_id, _te)
+    # Early fast-path detection from filename and file size — done BEFORE any
+    # PDF reading so large files (>20MB) and known fast-path manuals (Tetra Pak,
+    # HyPET) never enter pdfplumber, which OOM-kills the worker on big PDFs.
+    _fname_upper_m = pdf_path.name.upper()
+    _file_size_mb = pdf_path.stat().st_size / (1024 * 1024)
+    _skip_text_early = (
+        any(k in _fname_upper_m for k in ("TETRA", "TEM-", "TETRAPAK"))
+        or any(k in _fname_upper_m for k in ("HYPET", "HPET", "HPP5E", "HYPET5"))
+        or _file_size_mb > 20
+    )
+    log.info("[%s] file=%.1fMB skip_text=%s", manual_id, _file_size_mb, _skip_text_early)
+    if _skip_text_early:
         full_text, _offsets = "", {}
+        log.info("[%s] Skipping text extraction (large file or fast-path filename)", manual_id)
+    else:
+        # Text extraction runs before chunk_task to avoid GIL contention.
+        # Parallel pdfplumber+pdfminer on large PDFs (e.g. TeM 30MB) both hold
+        # the GIL during zlib decompression for hundreds of ms per page, multiplying
+        # text extraction time up to 4x (84s → 300s+) and preventing CHUNKING from
+        # being written to the DB before the container health limit is reached.
+        log.info("[%s] Extracting text (60-page cap)", manual_id)
+        try:
+            full_text, _offsets = await asyncio.wait_for(
+                asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=60
+            )
+        except (asyncio.TimeoutError, Exception) as _te:
+            log.warning("[%s] Text extraction failed/timed out: %s — using empty text", manual_id, _te)
+            full_text, _offsets = "", {}
     sample_text = full_text[:15000]
 
     # Classify finishes in ~5s; wrap with timeout to prevent hanging on slow network
@@ -747,14 +762,18 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model)
     log.info("[%s] Inferred machine_id: %s", manual_id, inferred_machine_id or "none")
 
-    # Detect fast-path machines by filename + classifier — determines timeout strategy
-    _fname_upper_m = pdf_path.name.upper()
-    is_tetra = any(k in (classification.manufacturer or "").upper() for k in ("TETRA", "TEM"))
+    # Detect fast-path machines by filename + classifier — determines timeout strategy.
+    # _fname_upper_m already set above. is_tetra also checks filename for "TeM-" prefix
+    # (Tetra Pak's document numbering scheme) so it works even when IBM 403 blocks classification.
+    is_tetra = (
+        any(k in (classification.manufacturer or "").upper() for k in ("TETRA", "TEM"))
+        or any(k in _fname_upper_m for k in ("TETRA", "TEM-", "TETRAPAK"))
+    )
     is_hypet = (
         any(k in _fname_upper_m for k in ("HYPET", "HPET", "HPP5E", "HYPET5"))
         or any(k in (classification.manufacturer or "").upper() for k in ("HUSKY", "HYPET"))
     )
-    log.info("[%s] is_tetra=%s is_hypet=%s manufacturer=%r", manual_id, is_tetra, is_hypet, classification.manufacturer)
+    log.info("[%s] is_tetra=%s is_hypet=%s manufacturer=%r file=%.1fMB", manual_id, is_tetra, is_hypet, classification.manufacturer, _file_size_mb)
 
     # Start chunk_task now that text extraction is complete (no more GIL contention)
     chunk_task = asyncio.ensure_future(

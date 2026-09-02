@@ -712,34 +712,16 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     await update_fn("CLASSIFYING")
 
-    # Early fast-path detection from filename and file size — done BEFORE any
-    # PDF reading so large files (>20MB) and known fast-path manuals (Tetra Pak,
-    # HyPET) never enter pdfplumber, which OOM-kills the worker on big PDFs.
     _fname_upper_m = pdf_path.name.upper()
     _file_size_mb = pdf_path.stat().st_size / (1024 * 1024)
-    _skip_text_early = (
-        any(k in _fname_upper_m for k in ("TETRA", "TEM-", "TETRAPAK"))
-        or any(k in _fname_upper_m for k in ("HYPET", "HPET", "HPP5E", "HYPET5"))
-        or _file_size_mb > 20
-    )
-    log.info("[%s] file=%.1fMB skip_text=%s", manual_id, _file_size_mb, _skip_text_early)
-    if _skip_text_early:
+    log.info("[%s] file=%.1fMB — extracting text (150-page cap)", manual_id, _file_size_mb)
+    try:
+        full_text, _offsets = await asyncio.wait_for(
+            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=90
+        )
+    except (asyncio.TimeoutError, Exception) as _te:
+        log.warning("[%s] Text extraction failed/timed out: %s — using empty text", manual_id, _te)
         full_text, _offsets = "", {}
-        log.info("[%s] Skipping text extraction (large file or fast-path filename)", manual_id)
-    else:
-        # Text extraction runs before chunk_task to avoid GIL contention.
-        # Parallel pdfplumber+pdfminer on large PDFs (e.g. TeM 30MB) both hold
-        # the GIL during zlib decompression for hundreds of ms per page, multiplying
-        # text extraction time up to 4x (84s → 300s+) and preventing CHUNKING from
-        # being written to the DB before the container health limit is reached.
-        log.info("[%s] Extracting text (60-page cap)", manual_id)
-        try:
-            full_text, _offsets = await asyncio.wait_for(
-                asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=60
-            )
-        except (asyncio.TimeoutError, Exception) as _te:
-            log.warning("[%s] Text extraction failed/timed out: %s — using empty text", manual_id, _te)
-            full_text, _offsets = "", {}
     sample_text = full_text[:15000]
 
     # Classify finishes in ~5s; wrap with timeout to prevent hanging on slow network
@@ -824,109 +806,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _extract_pmrspl_direct, _assign_task_page_citations, _extract_hypet_direct,
     )
 
-    # Tetra Pak PMRSPL direct path — bypasses AI; structured table has all data.
-    # is_tetra was computed before CHUNKING; always run PMRSPL for Tetra Pak even
-    # when chunking timed out, since sliding window chunks lack PMRSPL table data.
-    log.info("[%s] is_tetra=%s fallback=%s manufacturer=%r chunks=%d", manual_id, is_tetra, _chunking_used_fallback, classification.manufacturer, len(chunks))
-    if is_tetra:
-        log.info("[%s] Tetra Pak: running PMRSPL direct extractor (shielded, 300s timeout)", manual_id)
-        _pmrspl_fut = asyncio.ensure_future(asyncio.to_thread(_extract_pmrspl_direct, pdf_path))
-        try:
-            extracted_tasks = await asyncio.wait_for(asyncio.shield(_pmrspl_fut), timeout=300)
-        except asyncio.TimeoutError:
-            log.warning("[%s] PMRSPL timed out (300s) — falling through to AI path", manual_id)
-            extracted_tasks = []
-        except Exception as _pe:
-            log.warning("[%s] PMRSPL failed: %s — falling through to AI path", manual_id, _pe)
-            extracted_tasks = []
-        if extracted_tasks:
-            log.info("[%s] PMRSPL direct: %d tasks", manual_id, len(extracted_tasks))
-            for i, t in enumerate(extracted_tasks, 1):
-                t["task_no"] = i * 10
-
-            # Save one citation per task — each pointing to the exact PMRSPL page
-            # where that task's row was extracted. chunk_id is unique per task so
-            # the review UI can show a per-task citation with a clickable page number.
-            _pmrspl_citations = [
-                {
-                    "manual_id": manual_id,
-                    "chunk_id": f"pmrspl_task_{t['task_no']}",
-                    "page_start": t.get("page_start", 0),
-                    "page_end": t.get("page_end", t.get("page_start", 0)),
-                    "section": "Preventive Maintenance Recommendations",
-                    "content_type": "procedure",
-                    "text_excerpt": t.get("raw_text", t.get("description", ""))[:500],
-                    "manual_version": manual_version or "",
-                    "manufacturer": classification.manufacturer or "",
-                    "machine_model": classification.model or "",
-                    "interval_hours": t.get("interval_hours", 0),
-                }
-                for t in extracted_tasks
-                if t.get("page_start", 0) > 0
-            ]
-            if _pmrspl_citations:
-                try:
-                    import uuid as _uuid
-                    async with _ASL() as _cdb:
-                        for _r in _pmrspl_citations:
-                            try:
-                                await _cdb.execute(
-                                    _dtext(
-                                        "INSERT INTO citations"
-                                        " (citation_id, manual_id, chunk_id, page_start, page_end, section,"
-                                        "  content_type, text_excerpt, manual_version, manufacturer, machine_model, interval_hours)"
-                                        " VALUES (:cid,:mid,:ck,:ps,:pe,:sec,:ct,:tx,:mv,:mfr,:mm,:ih)"
-                                    ),
-                                    {
-                                        "cid": _uuid.uuid4().hex,
-                                        "mid": _r["manual_id"], "ck": _r["chunk_id"],
-                                        "ps": _r["page_start"], "pe": _r["page_end"],
-                                        "sec": _r["section"], "ct": _r["content_type"],
-                                        "tx": _r["text_excerpt"], "mv": _r["manual_version"],
-                                        "mfr": _r["manufacturer"], "mm": _r["machine_model"],
-                                        "ih": _r["interval_hours"],
-                                    },
-                                )
-                            except Exception:
-                                pass
-                        await _cdb.commit()
-                    log.info("[%s] Saved %d per-task PMRSPL citations", manual_id, len(_pmrspl_citations))
-                except Exception as _ce:
-                    log.warning("[%s] PMRSPL citation DB write failed: %s", manual_id, _ce)
-
-            await finalize_fn(
-                json.dumps(extracted_tasks),
-                classification.manufacturer,
-                json.dumps(classification.detected_chapters or []),
-                inferred_machine_id,
-            )
-            return
-        log.warning("[%s] PMRSPL returned 0 tasks — falling through to AI path", manual_id)
-
-    # ── HyPET fast path: load from bundled reference Excel, no AI needed ──────
-    if is_hypet:
-        log.info("[%s] HyPET 5e: loading tasks from reference Excel (shielded, 30s timeout)", manual_id)
-        _hypet_fut = asyncio.ensure_future(asyncio.to_thread(_extract_hypet_direct))
-        try:
-            extracted_tasks = await asyncio.wait_for(asyncio.shield(_hypet_fut), timeout=30)
-        except asyncio.TimeoutError:
-            log.warning("[%s] HyPET direct timed out — falling through to AI path", manual_id)
-            extracted_tasks = []
-        except Exception as _he:
-            log.warning("[%s] HyPET direct failed: %s — falling through to AI path", manual_id, _he)
-            extracted_tasks = []
-        if extracted_tasks:
-            log.info("[%s] HyPET direct: %d tasks", manual_id, len(extracted_tasks))
-            for i, t in enumerate(extracted_tasks, 1):
-                t["task_no"] = i * 10
-            await finalize_fn(
-                json.dumps(extracted_tasks),
-                "Husky",
-                json.dumps([]),
-                inferred_machine_id or "HYPET5E-L3",
-            )
-            return
-        log.warning("[%s] HyPET returned 0 tasks — falling through to AI path", manual_id)
+    log.info("[%s] is_tetra=%s is_hypet=%s manufacturer=%r chunks=%d — using full AI pipeline", manual_id, is_tetra, is_hypet, classification.manufacturer, len(chunks))
 
     # Filter < 8h to exclude false positives (chapter numbers, display values, figure refs)
     chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})

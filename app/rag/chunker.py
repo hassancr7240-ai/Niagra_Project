@@ -772,8 +772,8 @@ def _docling_md_to_chunks(
     return chunks
 
 
-_TEXT_PAGE_CAP = 60   # extract text from at most this many pages (enough for 15 000-char sample)
-_TEXT_CHAR_CAP = 25000  # stop reading pages once we have this many chars
+_TEXT_PAGE_CAP = 150  # extract text from at most this many pages (covers deep PM sections e.g. Tetra Pak p111)
+_TEXT_CHAR_CAP = 60000  # stop reading pages once we have this many chars
 
 
 def extract_text_from_pdf(pdf_path: Path) -> tuple[str, dict[int, int]]:

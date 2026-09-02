@@ -52,17 +52,18 @@ class Settings(BaseSettings):
     ftp_remote_base_path: str = "/pm-docs"
 
     # ── IBM watsonx.ai ────────────────────────────────────────────────────────
-    # Sole AI provider — IBM Granite models via watsonx.ai cloud.
-    # Task extraction  : ibm/granite-3-8b-instruct   (set via WATSONX_MODEL_GENERATION)
-    # Classification   : ibm/granite-3-2b-instruct   (set via WATSONX_MODEL_CLASSIFICATION)
-    # Analytics        : ibm/granite-3-8b-instruct   (set via WATSONX_MODEL_ANALYTICS)
-    # Embedding        : ibm/slate-125m-english-rtrvr-v2     (1024 dims)
+    # AI provider — IBM watsonx.ai cloud (us-south).
+    # Task extraction  : meta/llama-3-3-70b-instruct  (set via WATSONX_MODEL_GENERATION)
+    # Classification   : meta/llama-3-3-70b-instruct  (set via WATSONX_MODEL_CLASSIFICATION)
+    # Analytics        : meta/llama-3-3-70b-instruct  (set via WATSONX_MODEL_ANALYTICS)
+    # Embedding        : ibm/slate-125m-english-rtrvr-v2  (1024 dims — still available)
+    # Granite instruct models were deprecated by IBM; Llama 3.3 70B confirmed available.
     watsonx_api_key: Optional[str] = None
     watsonx_project_id: Optional[str] = None
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"
-    watsonx_model_generation: str = "ibm/granite-8b-code-instruct"
-    watsonx_model_classification: str = "ibm/granite-3-8b-instruct"
-    watsonx_model_analytics: str = "ibm/granite-3-8b-instruct"
+    watsonx_model_generation: str = "meta-llama/llama-3-3-70b-instruct"
+    watsonx_model_classification: str = "meta-llama/llama-3-3-70b-instruct"
+    watsonx_model_analytics: str = "meta-llama/llama-3-3-70b-instruct"
     watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr-v2"
     watsonx_embedding_dims: int = 1024
 

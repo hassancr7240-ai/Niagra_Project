@@ -461,6 +461,66 @@ _GENERIC_WORDS = frozenset({
 })
 
 
+def _build_pmrspl_description(action: str, comp_raw: str, comp_display: str, label: str, part_no: str | None) -> str:
+    """Generate a full 3-4 line PM task description from PMRSPL table fields."""
+    part_line = f"USE PART NUMBER {part_no.strip()} FOR REPLACEMENT." if part_no and part_no.strip() and part_no.strip().lower() not in ("none", "-", "") else ""
+    name = f"{comp_display} {label}".strip() if label else comp_display
+
+    if action == "REPLACE":
+        if "filter" in comp_raw:
+            lines = [
+                f"REPLACE {name}.",
+                "DEPRESSURISE AND DRAIN THE FILTER HOUSING BEFORE REMOVAL.",
+                f"INSTALL NEW FILTER ELEMENT AND REASSEMBLE HOUSING. {part_line}".strip(),
+                "PRESSURISE SYSTEM AND VERIFY NO BYPASS LEAKAGE AFTER INSTALLATION.",
+            ]
+        elif "valve" in comp_raw:
+            lines = [
+                f"REPLACE {name}.",
+                "ISOLATE VALVE FROM PROCESS AND RELIEVE ALL PRESSURE BEFORE REMOVAL.",
+                f"INSTALL NEW VALVE ASSEMBLY AND TORQUE FITTINGS TO SPECIFICATION. {part_line}".strip(),
+                "RESTORE TO SERVICE AND TEST FOR LEAK-FREE OPERATION UNDER PROCESS CONDITIONS.",
+            ]
+        else:
+            lines = [
+                f"REPLACE {name}.",
+                "ISOLATE COMPONENT FROM PROCESS BEFORE REMOVAL. REMOVE EXISTING UNIT.",
+                f"INSTALL NEW REPLACEMENT PART AND SECURE ALL CONNECTIONS. {part_line}".strip(),
+                "RESTORE TO SERVICE AND VERIFY CORRECT OPERATION WITHIN SPECIFIED PARAMETERS.",
+            ]
+    else:  # CHECK
+        if "sensor" in comp_raw or "switch" in comp_raw or "transmitter" in comp_raw:
+            lines = [
+                f"CHECK {name}.",
+                "VERIFY SENSOR OUTPUT SIGNAL AND RESPONSE TO TARGET DURING OPERATION.",
+                "CLEAN SENSOR FACE AND INSPECT CABLE AND CONNECTOR FOR DAMAGE OR CORROSION.",
+                "CONFIRM SENSING DISTANCE AND SWITCHING FUNCTION MEET SPECIFICATION. RECORD FINDINGS.",
+            ]
+        elif "valve" in comp_raw:
+            lines = [
+                f"CHECK {name}.",
+                "VERIFY VALVE OPENS AND CLOSES CORRECTLY AND SEATS FULLY WITHOUT LEAKAGE.",
+                "INSPECT ACTUATOR, SEATING SURFACES, AND SEALS FOR WEAR OR DAMAGE.",
+                "CONFIRM ACTUATOR RESPONSE TIME AND STROKE ARE WITHIN SPECIFICATION.",
+            ]
+        elif "filter" in comp_raw:
+            lines = [
+                f"CHECK {name}.",
+                "INSPECT FILTER ELEMENT FOR CONTAMINATION, BLOCKAGE, OR PHYSICAL DAMAGE.",
+                "MEASURE DIFFERENTIAL PRESSURE ACROSS FILTER HOUSING.",
+                "CLEAN OR SCHEDULE REPLACEMENT IF PRESSURE DROP EXCEEDS SPECIFIED LIMIT.",
+            ]
+        else:
+            lines = [
+                f"CHECK {name}.",
+                "INSPECT COMPONENT FOR VISIBLE SIGNS OF WEAR, DAMAGE, OR LEAKAGE.",
+                "VERIFY CORRECT FUNCTION AND PERFORMANCE WITHIN SPECIFIED PARAMETERS.",
+                "RECORD FINDINGS AND SCHEDULE CORRECTIVE ACTION OR REPLACEMENT IF REQUIRED.",
+            ]
+
+    return " ".join(l for l in lines if l)[:500]
+
+
 def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
     """
     Direct extractor for Tetra Pak PMRSPL format.
@@ -588,10 +648,10 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 if kw in comp_raw:
                     area = mapped
                     break
-            # Use component type + label as description (clean, short)
+            # Build a full 3-4 line maintenance instruction from action + component + label
             comp_display = cells[comp_col].upper() if comp_col < len(cells) else ""
-            description = f"{comp_display} — {label}".strip(" —")[:200] or f"{action} {area}"
             part_no = cells[iv_col + 2].strip() if iv_col + 2 < len(cells) else None
+            description = _build_pmrspl_description(action, comp_raw, comp_display, label, part_no)
             # Raw row text for the citation text excerpt
             raw_text = " | ".join(c for c in cells if c and c != "None")[:500]
             seen[key] = len(tasks)  # record index before appending
@@ -599,7 +659,7 @@ def _extract_pmrspl_direct(pdf_path: Path) -> list[dict]:
                 "task_no": (len(tasks) + 1) * 10,
                 "area": area,
                 "action": action,
-                "description": description[:200],
+                "description": description[:500],
                 "machine_state": "STOPPED",
                 "safety_flag": False,
                 "part_number": part_no or None,

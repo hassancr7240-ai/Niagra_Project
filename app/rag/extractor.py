@@ -57,7 +57,7 @@ async def extract_tasks_from_chunks(
 ) -> list[dict]:
     """Use LLM to extract structured PM tasks from retrieved manual chunks.
 
-    granite3.3:8b has a 128K context window. We batch chunks in groups of 60
+    Llama 3.3 70B has a 128K context window. We batch chunks in groups of 20
     (each truncated to 800 chars) so even large operating manuals get full coverage.
     Results from all batches are merged and deduplicated by description.
     """
@@ -92,7 +92,7 @@ async def _extract_watsonx(
     interval_hints: Optional[list[int]],
 ) -> list[dict]:
     """
-    IBM watsonx.ai Granite 3 8B task extraction.
+    IBM watsonx.ai Llama 3.3 70B task extraction.
     Uses IAM token auth. Model returns structured JSON output.
     """
     import httpx

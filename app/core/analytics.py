@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """
 IBM watsonx.ai Analytics — Data Flow Diagram: View History branch
-  granite-13b-instruct-v2
+  llama-3-3-70b-instruct
   → Analyse PM Patterns + Predict Next Due
   → Analyses overdue patterns
   → Recommends tech scheduling
@@ -25,7 +25,7 @@ async def analyse_pm_patterns(
     current_hours_map: dict[str, int],
 ) -> dict:
     """
-    IBM watsonx.ai Analytics — granite-13b-instruct-v2
+    IBM watsonx.ai Analytics — llama-3-3-70b-instruct
     Analyses PM history, predicts next due dates, identifies overdue patterns.
     Falls back to rule-based analysis if watsonx is not configured.
     """
@@ -44,8 +44,8 @@ async def _watsonx_analytics(
     current_hours_map: dict[str, int],
 ) -> dict:
     """
-    Call IBM watsonx.ai granite-13b-instruct-v2 for PM pattern analysis.
-    Data Flow Diagram: granite-13b-instruct-v2 → Analyse PM Patterns + Predict Next Due
+    Call IBM watsonx.ai llama-3-3-70b-instruct for PM pattern analysis.
+    Data Flow Diagram: llama-3-3-70b-instruct → Analyse PM Patterns + Predict Next Due
     Uses IAM token auth.
     """
     import httpx

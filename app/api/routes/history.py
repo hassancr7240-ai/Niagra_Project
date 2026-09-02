@@ -29,14 +29,14 @@ async def get_dashboard(
     GET /api/history/dashboard
     Data Flow Diagram — View History branch:
     GET /api/history → Query Azure SQL DB → IBM watsonx.ai Analytics
-    (granite-13b-instruct-v2) Analyse PM Patterns + Predict Next Due
+    (llama-3-3-70b-instruct) Analyse PM Patterns + Predict Next Due
     → Return Dashboard Data (Stats / Overdue / Schedule)
     """
     user.require("dashboard:read")
     dashboard = await build_dashboard(db)
 
     # ── IBM watsonx.ai Analytics (Data Flow Diagram) ──────────────────────────
-    # granite-13b-instruct-v2 → Analyse PM Patterns + Predict Next Due
+    # llama-3-3-70b-instruct → Analyse PM Patterns + Predict Next Due
     try:
         machines = await crud.get_all_machines(db)
         records, _ = await crud.get_pm_history(db, limit=100)

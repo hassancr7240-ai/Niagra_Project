@@ -208,7 +208,7 @@ def _detect_maintenance_chapters(text_lower: str) -> list[int]:
 
 async def _ai_classify_watsonx(sample_text: str) -> ClassificationResult:
     """
-    IBM watsonx.ai Granite 3 2B classifier.
+    IBM watsonx.ai Llama 3.3 70B classifier.
     Data Flow Diagram: Classification Model → detect machine type.
     """
     import httpx

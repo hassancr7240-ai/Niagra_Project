@@ -85,14 +85,18 @@ async def extract_tasks_from_chunks(
 
     return unique
 
+_OLLAMA_TIMEOUT_S = 420  # 7 minutes — if Ollama takes longer, skip to DB fallback
+
+
 async def _extract_ollama(
     text: str,
     manufacturer: str,
     model: Optional[str],
     interval_hints: Optional[list[int]],
 ) -> list[dict]:
-    """Ollama local AI fallback for task extraction."""
+    """Ollama local AI fallback for task extraction. Capped at 7 minutes."""
     import httpx
+    import asyncio
     url = f"{settings.ollama_url}/api/generate"
     prompt = (
         f"{_SYSTEM_PROMPT}\n\n"
@@ -102,18 +106,20 @@ async def _extract_ollama(
         "Return JSON array of tasks:"
     )
     try:
-        async with httpx.AsyncClient(timeout=180) as client:
-            resp = await client.post(url, json={
-                "model": settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-            })
+        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT_S) as client:
+            resp = await asyncio.wait_for(
+                client.post(url, json={"model": settings.ollama_model, "prompt": prompt, "stream": False}),
+                timeout=_OLLAMA_TIMEOUT_S,
+            )
             resp.raise_for_status()
             text_out = resp.json().get("response", "")
             tasks = json.loads(_extract_json_array(text_out))
             validated = _validate_tasks(tasks)
             logger.info("Ollama extracted %d tasks", len(validated))
             return validated
+    except asyncio.TimeoutError:
+        logger.warning("Ollama extraction timed out after 7 minutes — skipping to DB fallback")
+        return []
     except Exception as exc:
         logger.error("Ollama extraction failed: %s", exc)
         return []

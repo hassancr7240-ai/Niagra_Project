@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     watsonx_embedding_model: str = "ibm/slate-125m-english-rtrvr-v2"
     watsonx_embedding_dims: int = 1024
 
+    # ── Ollama (local AI fallback) ────────────────────────────────────────────
+    # Set OLLAMA_URL when an Ollama instance is available (e.g. http://<azure-vm-ip>:11434)
+    # Automatically used when IBM watsonx.ai returns 403 or is unreachable.
+    ollama_url: str = ""
+    ollama_model: str = "llama3.2:3b"
+    ollama_embedding_model: str = "nomic-embed-text"
+
     # ── Azure Document Intelligence ───────────────────────────────────────────
     azure_doc_intelligence_endpoint: Optional[str] = None
     azure_doc_intelligence_key: Optional[str] = None

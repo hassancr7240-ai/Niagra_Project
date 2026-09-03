@@ -17,7 +17,11 @@ _WATSONX_CONCURRENCY = 5
 async def embed_chunks(chunks: list[TextChunk]) -> list[dict]:
     if not chunks:
         return []
-    return await _embed_watsonx(chunks)
+    result = await _embed_watsonx(chunks)
+    if not result and settings.ollama_url:
+        logger.warning("IBM embedding returned 0 — trying Ollama fallback at %s", settings.ollama_url)
+        result = await _embed_ollama(chunks)
+    return result
 
 
 def _chunk_to_dict(chunk: TextChunk, embedding: list[float]) -> dict:
@@ -85,4 +89,34 @@ async def _embed_watsonx(chunks: list[TextChunk]) -> list[dict]:
 
     logger.info("watsonx embedded %d/%d chunks (%d concurrent batches)",
                 len(results), len(chunks), len(batches))
+    return results
+
+
+async def _embed_ollama(chunks: list[TextChunk]) -> list[dict]:
+    """Ollama embedding fallback — one request per chunk, all concurrent."""
+    import httpx
+    url = f"{settings.ollama_url}/api/embeddings"
+
+    async def _embed_one(chunk: TextChunk, client: httpx.AsyncClient) -> Optional[dict]:
+        try:
+            resp = await client.post(
+                url,
+                json={"model": settings.ollama_embedding_model, "prompt": chunk.text},
+            )
+            resp.raise_for_status()
+            emb = resp.json().get("embedding", [])
+            if emb:
+                return _chunk_to_dict(chunk, emb)
+        except Exception as exc:
+            logger.error("Ollama embedding failed for chunk %s: %s", chunk.chunk_id, exc)
+        return None
+
+    results: list[dict] = []
+    async with httpx.AsyncClient(timeout=120) as client:
+        responses = await asyncio.gather(*[_embed_one(c, client) for c in chunks])
+    for r in responses:
+        if r:
+            results.append(r)
+
+    logger.info("Ollama embedded %d/%d chunks", len(results), len(chunks))
     return results

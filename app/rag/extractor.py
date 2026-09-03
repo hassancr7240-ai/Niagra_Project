@@ -85,6 +85,40 @@ async def extract_tasks_from_chunks(
 
     return unique
 
+async def _extract_ollama(
+    text: str,
+    manufacturer: str,
+    model: Optional[str],
+    interval_hints: Optional[list[int]],
+) -> list[dict]:
+    """Ollama local AI fallback for task extraction."""
+    import httpx
+    url = f"{settings.ollama_url}/api/generate"
+    prompt = (
+        f"{_SYSTEM_PROMPT}\n\n"
+        f"Machine: {manufacturer} {model or ''}\n"
+        f"Known intervals: {interval_hints or 'detect from text'}\n\n"
+        f"Manual text:\n{text[:6000]}\n\n"
+        "Return JSON array of tasks:"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(url, json={
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+            })
+            resp.raise_for_status()
+            text_out = resp.json().get("response", "")
+            tasks = json.loads(_extract_json_array(text_out))
+            validated = _validate_tasks(tasks)
+            logger.info("Ollama extracted %d tasks", len(validated))
+            return validated
+    except Exception as exc:
+        logger.error("Ollama extraction failed: %s", exc)
+        return []
+
+
 async def _extract_watsonx(
     text: str,
     manufacturer: str,
@@ -100,6 +134,8 @@ async def _extract_watsonx(
 
     if not settings.watsonx_api_key:
         logger.error("WATSONX_API_KEY not set")
+        if settings.ollama_url:
+            return await _extract_ollama(text, manufacturer, model, interval_hints)
         return []
 
     url = f"{settings.watsonx_url}/ml/v1/text/generation?version=2024-03-14"
@@ -134,6 +170,9 @@ Return JSON array of tasks:"""
             return _validate_tasks(tasks)
     except Exception as exc:
         logger.error("watsonx extraction failed: %s", exc)
+        if settings.ollama_url:
+            logger.info("Falling back to Ollama for task extraction")
+            return await _extract_ollama(text, manufacturer, model, interval_hints)
         return []
 
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -668,20 +668,24 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
             pass
 
 
-def _infer_machine_id(manufacturer: str, model: Optional[str]) -> str:
+def _infer_machine_id(manufacturer: str, model: Optional[str], filename: str = "") -> str:
     """Map classification result to a known machine_id for CON L3 ZIP generation."""
     mfr = (manufacturer or "").upper()
     mod = (model or "").upper()
-    if "EISBAR" in mfr or "DEHUMID" in mfr:
+    fname = (filename or "").upper()
+
+    if "EISBAR" in mfr or "DEHUMID" in mfr or "DEHUMID" in fname:
         return "DEHUMIDIFIER-L3"
-    if "TETRA" in mfr:
+    if "TETRA" in mfr or any(k in fname for k in ("TETRA", "TEM-", "TETRAPAK")):
         return "TETRAPAK-ASEPTIC-L3"
-    if any(k in mfr for k in ("KRONES", "VARIOPAC", "CONTIFORM", "SHRINK")):
-        if "SHRINK" in mod:
+    if any(k in mfr or k in fname for k in ("HUSKY", "HYPET", "HPP5E", "HPET")):
+        return ""  # HyPET uses Excel, not SQL — handled separately
+    if any(k in mfr or k in fname for k in ("KRONES", "VARIOPAC", "CONTIFORM", "SHRINK")):
+        if "SHRINK" in mod or "SHRINK" in fname:
             return "SHRINK-TUNNEL-L3"
-        if "VARIOPAC" in mod:
+        if "VARIOPAC" in mod or "VARIOPAC" in fname:
             return "VARIOPAC-PRO-L3"
-        if "CONTIFORM" in mod:
+        if "CONTIFORM" in mod or "CONTIFORM" in fname:
             return "CONTIFORM-C3-L3"
         return "VARIOPAC-PRO-L3"  # KRONES default
     if "SIG" in mfr or "COMBIBLOC" in mfr:
@@ -704,7 +708,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     from app.rag.classifier import classify_manual, extract_manual_version
     from app.rag.embedder import embed_chunks
     from app.rag.extractor import extract_tasks_from_chunks
-    from app.rag.retriever import index_chunks, retrieve_top_k
+    from app.rag.retriever import index_chunks
     from app.config import get_settings
 
     log = logging.getLogger(__name__)
@@ -717,10 +721,13 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] file=%.1fMB — extracting text (150-page cap)", manual_id, _file_size_mb)
     try:
         full_text, _offsets = await asyncio.wait_for(
-            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=90
+            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=480  # 8 min max — then SQL fallback
         )
-    except (asyncio.TimeoutError, Exception) as _te:
-        log.warning("[%s] Text extraction failed/timed out: %s — using empty text", manual_id, _te)
+    except asyncio.TimeoutError:
+        log.warning("[%s] Text extraction timed out (8 min) — falling back to SQL/Excel library", manual_id)
+        full_text, _offsets = "", {}
+    except Exception as _te:
+        log.warning("[%s] Text extraction failed: %s — using empty text", manual_id, _te)
         full_text, _offsets = "", {}
     sample_text = full_text[:15000]
 
@@ -741,7 +748,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     if manual_version:
         log.info("[%s] Detected manual version: %s", manual_id, manual_version)
 
-    inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model)
+    inferred_machine_id = _infer_machine_id(classification.manufacturer, classification.model, _fname_upper_m)
     log.info("[%s] Inferred machine_id: %s", manual_id, inferred_machine_id or "none")
 
     # Detect fast-path machines by filename + classifier — determines timeout strategy.
@@ -775,7 +782,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     _chunking_used_fallback = False
     # Tetra Pak PDFs (800+ pages) saturate the GIL in smart_chunk_pdf; PMRSPL
     # handles their task extraction anyway, so fall back to sliding window in 20s.
-    _chunk_timeout = 20 if (is_tetra or is_hypet) else 90
+    # All machines get up to 8 min for chunking (covers OCR on scanned PDFs).
+    # SQL/Excel library always supplements so even a timeout still yields good results.
+    _chunk_timeout = 480
     try:
         # Shield so a timeout doesn't block the event loop waiting for the thread.
         # The underlying thread cannot be preempted; shield lets us fall back
@@ -820,29 +829,44 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
     _embedding_failed = len(embedded) == 0 and len(embed_subset) > 0
     if _embedding_failed:
-        log.warning("[%s] Embedding returned 0 — watsonx may be unavailable (403/quota). Skipping AI extraction.", manual_id)
+        log.warning("[%s] Embedding returned 0 — will attempt extraction from raw text chunks", manual_id)
     if embedded:
         await index_chunks(embedded, manual_id)
-    proxy = next(
-        (e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")),
-        embedded[0] if embedded else None,
-    )
-    if proxy:
-        top_chunks = await retrieve_top_k(proxy["embedding"], manual_id=manual_id, top_k=10)
-    else:
-        top_chunks = [{"text": e["text"], "page_start": e.get("page_start", 0),
-                       "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
-                      for e in embedded[:10]]
 
-    if not _embedding_failed:
-        extracted_tasks = await extract_tasks_from_chunks(
-            top_chunks,
-            manufacturer=classification.manufacturer,
-            model=classification.model,
-            interval_hints=interval_hints,
-        )
+    # Build extraction chunk list — use ALL embedded chunks, prioritising
+    # table_row/checkbox types which carry interval data most reliably.
+    # Cap at 60 chunks (15 batches × 4 chunks) to stay within timeout budget.
+    # Skip similarity retrieval for extraction — RAG retrieval is for chat;
+    # extraction needs every section of the manual, not just top-similar ones.
+    if embedded:
+        _emb_priority = [e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")]
+        _emb_other    = [e for e in embedded if e.get("chunk_type") not in ("table_row", "checkbox")]
+        _extraction_pool = (_emb_priority + _emb_other)[:60]
+        top_chunks = [
+            {"text": e["text"], "page_start": e.get("page_start", 0),
+             "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
+            for e in _extraction_pool
+        ]
     else:
-        extracted_tasks = []
+        # Embedding failed — fall back to raw TextChunk objects so AI still runs
+        _raw_priority = [c for c in embed_subset if getattr(c, "chunk_type", "") in ("table_row", "checkbox")]
+        _raw_other    = [c for c in embed_subset if getattr(c, "chunk_type", "") not in ("table_row", "checkbox")]
+        _raw_pool     = (_raw_priority + _raw_other)[:60]
+        top_chunks = [
+            {"text": c.text, "page_start": c.page_start,
+             "page_end": c.page_end, "source_file": str(getattr(c, "source_file", "") or "")}
+            for c in _raw_pool
+        ]
+
+    log.info("[%s] Sending %d chunks to AI extraction (embedding_ok=%s)",
+             manual_id, len(top_chunks), not _embedding_failed)
+
+    extracted_tasks = await extract_tasks_from_chunks(
+        top_chunks,
+        manufacturer=classification.manufacturer,
+        model=classification.model,
+        interval_hints=interval_hints,
+    )
 
     # Table fallback: run whenever AI returned 0, regardless of chunking fallback
     if not extracted_tasks:
@@ -855,6 +879,24 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             extracted_tasks = []
         if extracted_tasks:
             log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+
+    # HyPET reference Excel fallback: AI on a scanned HyPET PDF yields very few tasks.
+    # Load the manager-validated reference schedule and merge — AI tasks at intervals
+    # not covered by the Excel are kept; the Excel provides the complete base set.
+    if is_hypet and len(extracted_tasks) < 10:
+        log.info("[%s] HyPET detected with <10 AI tasks — loading reference Excel", manual_id)
+        try:
+            _hypet_tasks = await asyncio.to_thread(_extract_hypet_direct)
+            if _hypet_tasks:
+                if not extracted_tasks:
+                    extracted_tasks = _hypet_tasks
+                else:
+                    _hypet_intervals = {t["interval_hours"] for t in _hypet_tasks}
+                    _ai_only = [t for t in extracted_tasks if t.get("interval_hours") not in _hypet_intervals]
+                    extracted_tasks = _hypet_tasks + _ai_only
+                log.info("[%s] HyPET reference: %d tasks total", manual_id, len(extracted_tasks))
+        except Exception as _he:
+            log.warning("[%s] HyPET reference load failed: %s", manual_id, _he)
 
     # Mark AI-extracted tasks with source so UI can distinguish them
     for _t in extracted_tasks:

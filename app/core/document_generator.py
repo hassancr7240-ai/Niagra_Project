@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import os
@@ -680,13 +680,22 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
         desc = getattr(t, "description", None) if not isinstance(t, dict) else t.get("description")
         action = getattr(t, "action", None) if not isinstance(t, dict) else t.get("action")
 
-        # Build action string: part code leads for scannability
+        # Build action string: full description in CAPS
         desc_upper = (desc or "").upper().strip()
         action_upper = (action or "").upper().strip()
         if action_upper and not desc_upper.startswith(action_upper):
             action_text = f"{action_upper} {desc_upper}".strip()
         else:
             action_text = desc_upper
+
+        # Area column: "MACHINE NAME- ACTION_VERB" format matching the CON L3 template
+        # e.g. "KRONES SHRINK TUNNEL- INSPECT", "KRONES SHRINK TUNNEL- SAFETY"
+        verb = action_upper.split()[0] if action_upper else ""
+        area_upper = (area or "GENERAL").upper().strip()
+        if verb and verb not in ("GENERAL",):
+            display_area = f"{machine_name.upper()}- {verb}"
+        else:
+            display_area = area_upper
 
         # Append a rotating procedure note so adjacent rows look distinct
         _PROC_VARIANTS = {
@@ -742,7 +751,7 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
 
         _fmt_cell(ws, row, 1, task_no, align="right")
         _merge_box(ws, row, 2, 4)
-        ws.cell(row=row, column=2, value=(area or "").upper())
+        ws.cell(row=row, column=2, value=display_area)
         ws.cell(row=row, column=2).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
         _merge_box(ws, row, 5, 9)
         ws.cell(row=row, column=5, value=action_text)

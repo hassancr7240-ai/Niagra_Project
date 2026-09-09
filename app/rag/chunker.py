@@ -289,6 +289,14 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
                 if not row_data:
                     continue
 
+                # Skip navigation sidebar rows: auto-generated headers + very little content.
+                # Krones PDFs embed a chapter-title table on every page (e.g.,
+                # "col_0: Maintenance instructions") that adds zero task information.
+                if all(h.startswith('col_') for h in raw_headers):
+                    total_value_words = sum(len(v.split()) for v in row_data.values())
+                    if total_value_words < 5:
+                        continue
+
                 row_text = ' | '.join(f'{h}: {v}' for h, v in row_data.items())
                 # PMRSPL: extract interval from known column first
                 pmrspl_iv: Optional[int] = None

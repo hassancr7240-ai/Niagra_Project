@@ -839,9 +839,19 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     # Skip similarity retrieval for extraction — RAG retrieval is for chat;
     # extraction needs every section of the manual, not just top-similar ones.
     if embedded:
-        _emb_priority = [e for e in embedded if e.get("chunk_type") in ("table_row", "checkbox")]
-        _emb_other    = [e for e in embedded if e.get("chunk_type") not in ("table_row", "checkbox")]
-        _extraction_pool = (_emb_priority + _emb_other)[:60]
+        # Balanced pool: table_row/checkbox carry structured interval data;
+        # section/paragraph carry the actual task prose for manuals like Krones
+        # that describe tasks in bullet paragraphs, not structured tables.
+        # Without section slots, 47 useless navigation header rows crowd out
+        # the actual maintenance text.
+        _emb_tables   = [e for e in embedded if e.get("chunk_type") == "table_row"]
+        _emb_cboxes   = [e for e in embedded if e.get("chunk_type") == "checkbox"]
+        _emb_sections = [e for e in embedded if e.get("chunk_type") in ("section", "paragraph")]
+        _emb_other    = [e for e in embedded if e.get("chunk_type") not in
+                         ("table_row", "checkbox", "section", "paragraph")]
+        # Up to 25 tables + 15 checkboxes + 15 section text + 5 other = 60 max
+        _extraction_pool = (_emb_tables[:25] + _emb_cboxes[:15] +
+                            _emb_sections[:15] + _emb_other[:5])[:60]
         top_chunks = [
             {"text": e["text"], "page_start": e.get("page_start", 0),
              "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
@@ -849,9 +859,12 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         ]
     else:
         # Embedding failed — fall back to raw TextChunk objects so AI still runs
-        _raw_priority = [c for c in embed_subset if getattr(c, "chunk_type", "") in ("table_row", "checkbox")]
-        _raw_other    = [c for c in embed_subset if getattr(c, "chunk_type", "") not in ("table_row", "checkbox")]
-        _raw_pool     = (_raw_priority + _raw_other)[:60]
+        _raw_tables   = [c for c in embed_subset if getattr(c, "chunk_type", "") == "table_row"]
+        _raw_cboxes   = [c for c in embed_subset if getattr(c, "chunk_type", "") == "checkbox"]
+        _raw_sections = [c for c in embed_subset if getattr(c, "chunk_type", "") in ("section", "paragraph")]
+        _raw_other    = [c for c in embed_subset if getattr(c, "chunk_type", "") not in
+                         ("table_row", "checkbox", "section", "paragraph")]
+        _raw_pool     = (_raw_tables[:25] + _raw_cboxes[:15] + _raw_sections[:15] + _raw_other[:5])[:60]
         top_chunks = [
             {"text": c.text, "page_start": c.page_start,
              "page_end": c.page_end, "source_file": str(getattr(c, "source_file", "") or "")}

@@ -821,10 +821,18 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     chunk_intervals = list({c.interval_hint for c in chunks if c.interval_hint and c.interval_hint >= 8})
     interval_hints = list(set(chunk_intervals) | set(_guess_intervals(classification.manufacturer)))
 
-    priority = [c for c in chunks if c.chunk_type in ("table_row", "checkbox")]
-    others   = [c for c in chunks if c.chunk_type not in ("table_row", "checkbox")]
-    embed_subset = (priority + others)[:200]
-    log.info("[%s] Calling embed_chunks with %d chunks (priority=%d others=%d)", manual_id, len(embed_subset), len(priority), len(others))
+    # Balance the embed subset so section/paragraph chunks always get slots.
+    # Without this, a PDF with 200 table rows fills all 200 embed slots, leaving
+    # no section chunks for the extraction pool's section[:15] bucket.
+    _es_tables   = [c for c in chunks if c.chunk_type == "table_row"]
+    _es_cboxes   = [c for c in chunks if c.chunk_type == "checkbox"]
+    _es_sections = [c for c in chunks if c.chunk_type in ("section", "paragraph")]
+    _es_other    = [c for c in chunks if c.chunk_type not in
+                    ("table_row", "checkbox", "section", "paragraph")]
+    embed_subset = (_es_tables[:80] + _es_cboxes[:60] + _es_sections[:50] + _es_other[:10])[:200]
+    log.info("[%s] Calling embed_chunks with %d chunks (tables=%d cboxes=%d sections=%d other=%d)",
+             manual_id, len(embed_subset), len(_es_tables[:80]), len(_es_cboxes[:60]),
+             len(_es_sections[:50]), len(_es_other[:10]))
     embedded = await embed_chunks(embed_subset)
     log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
     _embedding_failed = len(embedded) == 0 and len(embed_subset) > 0

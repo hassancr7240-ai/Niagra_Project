@@ -5,10 +5,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import logging
 import pdfplumber
 
+logger = logging.getLogger(__name__)
 
 _TABLE_TIMEOUT = object()  # sentinel — distinguishes "timed out" from "no tables on page"
+_OCR_MIN_TEXT_CHARS = 50   # pages with fewer extractable chars than this trigger OCR
+
+
+def _ocr_page_text(page) -> str:
+    """
+    Render a pdfplumber page at 200 DPI and run Tesseract OCR on it.
+    Only called when pdfplumber returns fewer than _OCR_MIN_TEXT_CHARS characters.
+    Returns empty string gracefully if pytesseract is not installed.
+    """
+    try:
+        import pytesseract
+        img = page.to_image(resolution=200).original
+        return pytesseract.image_to_string(img, config="--psm 6") or ""
+    except ImportError:
+        return ""
+    except Exception as exc:
+        logger.debug("OCR failed on page %s: %s", page.page_number, exc)
+        return ""
+
+
+def _get_page_text(page) -> str:
+    """Return page text, falling back to Tesseract OCR for scanned pages."""
+    text = page.extract_text() or ""
+    if len(text.strip()) < _OCR_MIN_TEXT_CHARS:
+        ocr = _ocr_page_text(page)
+        if ocr.strip():
+            logger.info("OCR used on page %s (%d pdfplumber chars → %d OCR chars)",
+                        page.page_number, len(text.strip()), len(ocr.strip()))
+            return ocr
+    return text
 
 
 def _safe_extract_tables(page, timeout_s: int = 5):
@@ -179,8 +211,8 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
     for page in pdf.pages[:_TABLE_EXTRACT_CAP]:
         pn = page.page_number
         # Fast gate: only run the slow extract_tables() on pages that
-        # actually contain maintenance-related text.
-        page_text_lower = (page.extract_text() or '').lower()
+        # actually contain maintenance-related text.  Uses OCR for scanned pages.
+        page_text_lower = _get_page_text(page).lower()
         if not any(kw in page_text_lower for kw in _TABLE_SCAN_KW):
             continue
         # Capture interval from page text — Krones format puts interval in the
@@ -369,7 +401,7 @@ def _extract_section_chunks(
 
     for page in pdf.pages[:_TABLE_PAGE_CAP]:
         pn = page.page_number
-        for line in (page.extract_text() or '').split('\n'):
+        for line in _get_page_text(page).split('\n'):
             stripped = line.strip()
             if not stripped:
                 continue

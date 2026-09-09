@@ -16,11 +16,14 @@ settings = get_settings()
 _VALID_ACTIONS = {
     "LOCKOUT", "CHECK", "LISTEN", "CLEAN", "REPLACE",
     "LUBRICATE", "VERIFY", "TEST", "CONFIRM", "INSPECT",
+    "ADJUST", "CALIBRATE", "TIGHTEN", "DRAIN", "REFILL",
+    "MEASURE", "RECORD", "GREASE", "TORQUE", "RESET",
 }
 _VALID_STATES = {"RUNNING", "STOPPED", "POWERED_OFF"}
 _VALID_INTERVALS = {
-    8, 24, 40, 100, 120, 240, 500, 1000, 1500, 2000, 3000, 4000, 5000,
-    6000, 8000, 10000, 12000, 18000, 24000, 30000, 42000, 45000,
+    8, 16, 24, 40, 80, 100, 120, 160, 240, 500, 750, 1000, 1500, 2000,
+    2500, 3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000, 18000,
+    20000, 24000, 30000, 36000, 42000, 45000, 48000, 60000, 72000,
 }
 
 # ── Few-shot examples so any model understands the exact format ───────────────
@@ -45,7 +48,7 @@ EXTRACTION RULES:
 4. machine_state: RUNNING=task done while machine produces | STOPPED=machine halted but powered | POWERED_OFF=full LOTO/lockout required.
 5. safety_flag: true if LOTO, lockout, tagout, de-energise, or entering danger zone required.
 6. area: CAPS category — CONVEYOR, DRIVE, ELECTRICAL, FILTER, LUBRICATION, SAFETY, SENSORS, PNEUMATIC, HYDRAULIC, COOLING, SEALING, FRAME, GEARBOX, PUMP, VALVE, BEARING, BELT, CHAIN, CLUTCH, MOTOR, or GENERAL.
-7. action: exactly one of LOCKOUT / CHECK / LISTEN / CLEAN / REPLACE / LUBRICATE / VERIFY / TEST / CONFIRM / INSPECT.
+7. action: exactly one of LOCKOUT / CHECK / LISTEN / CLEAN / REPLACE / LUBRICATE / VERIFY / TEST / CONFIRM / INSPECT / ADJUST / CALIBRATE / TIGHTEN / DRAIN / REFILL / MEASURE / RECORD / GREASE / TORQUE / RESET.
 8. description: FULL instruction in CAPITAL LETTERS — include measurements, part numbers, lubricant types, torque specs.
 9. part_number: exact part number string if stated in text, otherwise null.
 

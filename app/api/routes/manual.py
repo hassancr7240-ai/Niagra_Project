@@ -680,6 +680,8 @@ def _infer_machine_id(manufacturer: str, model: Optional[str], filename: str = "
         return "TETRAPAK-ASEPTIC-L3"
     if any(k in mfr or k in fname for k in ("HUSKY", "HYPET", "HPP5E", "HPET")):
         return ""  # HyPET uses Excel, not SQL — handled separately
+    if any(k in mfr or k in fname for k in ("CON L3", "CON-L3", "BOTTLE CODER", "BOTTLE CODING", "BOTTLECODER")):
+        return "BOTTLECODER-L3"
     if any(k in mfr or k in fname for k in ("KRONES", "VARIOPAC", "CONTIFORM", "SHRINK")):
         if "SHRINK" in mod or "SHRINK" in fname:
             return "SHRINK-TUNNEL-L3"

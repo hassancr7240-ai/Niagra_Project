@@ -28,6 +28,7 @@ _KRONES_KEYWORDS = [
     "shrinking tunnel", "shrink tunnel", "krones ag",
 ]
 _EISBAR_KEYWORDS = ["eisbär", "eisbar", "das-e", "das e", "trockentechnik", "dehumidifier das"]
+_CON_L3_KEYWORDS = ["bottle coder", "con l3", "con-l3", "bottle coding", "continuous coder"]
 _MAINTENANCE_KEYWORDS = [
     "maintenance", "wartung", "inspection", "service", "lubrication",
     "cleaning", "replace", "check", "filter change",
@@ -96,6 +97,18 @@ def _keyword_classify(text: str) -> ClassificationResult:
             detected_chapters=[9],
         )
 
+    # CON L3 Bottle Coder
+    con_l3_matches = sum(1 for kw in _CON_L3_KEYWORDS if kw in text_lower)
+    if con_l3_matches >= 1:
+        return ClassificationResult(
+            manufacturer="CON L3",
+            model="BOTTLE CODER",
+            machine_type="THIRD_PARTY",
+            confidence=0.85,
+            method="keyword",
+            detected_chapters=[1],
+        )
+
     # Boost confidence if maintenance keywords are present — skip AI
     maintenance_hits = sum(1 for kw in _MAINTENANCE_KEYWORDS if kw in text_lower)
     confidence = min(0.7, 0.3 + maintenance_hits * 0.08)
@@ -128,6 +141,7 @@ def _detect_manufacturer_from_text(text_lower: str) -> str:
         ("bosch", "BOSCH"), ("abb", "ABB"), ("siemens", "SIEMENS"),
         ("festo", "FESTO"), ("sew", "SEW"), ("schneider", "SCHNEIDER"),
         ("niagara", "NIAGARA"), ("pmrspl", "TETRA PAK"),
+        ("bottle coder", "CON L3"), ("con l3", "CON L3"), ("bottle coding", "CON L3"),
     ]
     for kw, name in known:
         if kw in header:

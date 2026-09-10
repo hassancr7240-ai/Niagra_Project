@@ -61,9 +61,10 @@ OUTPUT ONLY a valid JSON array — no explanation, no markdown, no code fences. 
 _CHARS_PER_CHUNK       = 1500  # chars per chunk — smaller input, model focuses better
 _BATCH_SIZE_OLLAMA     = 3     # 3B model: small context window, keep batches tiny
 _BATCH_SIZE_IBM        = 8     # 70B model: 128K context — 8 chunks × 1500 chars fits easily
-_PER_CALL_TIMEOUT      = 150   # seconds per Ollama call before we skip that batch
+_PER_CALL_TIMEOUT      = 90    # seconds per Ollama call — llama3.2:3b responds within 60s; 90s gives headroom
 _IBM_CALL_TIMEOUT      = 120   # seconds per IBM call (cloud API, faster inference)
 _NUM_PREDICT           = 4096  # CRITICAL: must be high enough for 10-15 tasks per batch
+_EXTRACTION_BUDGET_S   = 300   # 5-minute hard budget for entire extraction; returns partial results on exceed
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -81,7 +82,10 @@ async def extract_tasks_from_chunks(
     count by ~3x vs Ollama's 3-chunk batches.
     All batches are sequential (Ollama single-threaded on ACI CPU).
     Results are merged and deduplicated.
+    Stops early and returns partial results if _EXTRACTION_BUDGET_S is exceeded.
     """
+    import time
+
     if not chunks:
         return []
 
@@ -92,8 +96,16 @@ async def extract_tasks_from_chunks(
 
     all_tasks: list[dict] = []
     total_batches = (len(chunks) + batch_size - 1) // batch_size
+    deadline = time.monotonic() + _EXTRACTION_BUDGET_S
 
     for batch_idx in range(total_batches):
+        if time.monotonic() > deadline:
+            logger.warning(
+                "[extractor] Budget %ds exceeded at batch %d/%d — returning %d partial tasks",
+                _EXTRACTION_BUDGET_S, batch_idx + 1, total_batches, len(all_tasks),
+            )
+            break
+
         batch = chunks[batch_idx * batch_size: (batch_idx + 1) * batch_size]
         combined = "\n\n--- SECTION BREAK ---\n\n".join(
             c["text"][:_CHARS_PER_CHUNK] for c in batch
@@ -194,7 +206,7 @@ async def _extract_ollama(
         "OUTPUT ONLY A JSON ARRAY. No explanation. No markdown. No code fences. Start with [ and end with ]."
     )
     try:
-        async with httpx.AsyncClient(timeout=_PER_CALL_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(_PER_CALL_TIMEOUT, connect=5.0)) as client:
             resp = await asyncio.wait_for(
                 client.post(url, json={
                     "model": settings.ollama_model,

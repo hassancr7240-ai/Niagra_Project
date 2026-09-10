@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -852,20 +853,40 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     # Cap at 60 chunks (15 batches × 4 chunks) to stay within timeout budget.
     # Skip similarity retrieval for extraction — RAG retrieval is for chat;
     # extraction needs every section of the manual, not just top-similar ones.
+    # Pre-filter helper: reject TOC/navigation content and very short chunks that
+    # carry no extractable task info (page refs, headers, figure captions, etc.)
+    def _is_useful_for_extraction(text: str, ctype: str) -> bool:
+        if ctype == "toc":
+            return False
+        stripped = (text or "").strip()
+        if len(stripped) < 80:
+            return False
+        # Pure page-number / figure-reference lines ― no task content
+        if re.match(r'^(?:fig(?:ure)?|table|see\s|refer to|page|p\.)\s', stripped, re.I):
+            return False
+        return True
+
     if embedded:
         # Balanced pool: table_row/checkbox carry structured interval data;
         # section/paragraph carry the actual task prose for manuals like Krones
         # that describe tasks in bullet paragraphs, not structured tables.
-        # Without section slots, 47 useless navigation header rows crowd out
-        # the actual maintenance text.
-        _emb_tables   = [e for e in embedded if e.get("chunk_type") == "table_row"]
-        _emb_cboxes   = [e for e in embedded if e.get("chunk_type") == "checkbox"]
-        _emb_sections = [e for e in embedded if e.get("chunk_type") in ("section", "paragraph")]
-        _emb_other    = [e for e in embedded if e.get("chunk_type") not in
-                         ("table_row", "checkbox", "section", "paragraph")]
-        # Up to 25 tables + 15 checkboxes + 15 section text + 5 other = 60 max
-        _extraction_pool = (_emb_tables[:25] + _emb_cboxes[:15] +
-                            _emb_sections[:15] + _emb_other[:5])[:60]
+        _emb_tables   = [e for e in embedded
+                         if e.get("chunk_type") == "table_row"
+                         and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
+        _emb_cboxes   = [e for e in embedded
+                         if e.get("chunk_type") == "checkbox"
+                         and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
+        _emb_sections = [e for e in embedded
+                         if e.get("chunk_type") in ("section", "paragraph")
+                         and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
+        _emb_other    = [e for e in embedded
+                         if e.get("chunk_type") not in ("table_row", "checkbox", "section", "paragraph")
+                         and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
+        # 20 tables + 12 checkboxes + 12 sections + 4 other = 48 max
+        # Smaller pool than before (was 60) → max 16 Ollama batches @ 90s = ~24 min worst-case,
+        # but extractor's 5-min budget stops it early and returns partial results.
+        _extraction_pool = (_emb_tables[:20] + _emb_cboxes[:12] +
+                            _emb_sections[:12] + _emb_other[:4])[:48]
         top_chunks = [
             {"text": e["text"], "page_start": e.get("page_start", 0),
              "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
@@ -873,12 +894,19 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         ]
     else:
         # Embedding failed — fall back to raw TextChunk objects so AI still runs
-        _raw_tables   = [c for c in embed_subset if getattr(c, "chunk_type", "") == "table_row"]
-        _raw_cboxes   = [c for c in embed_subset if getattr(c, "chunk_type", "") == "checkbox"]
-        _raw_sections = [c for c in embed_subset if getattr(c, "chunk_type", "") in ("section", "paragraph")]
-        _raw_other    = [c for c in embed_subset if getattr(c, "chunk_type", "") not in
-                         ("table_row", "checkbox", "section", "paragraph")]
-        _raw_pool     = (_raw_tables[:25] + _raw_cboxes[:15] + _raw_sections[:15] + _raw_other[:5])[:60]
+        _raw_tables   = [c for c in embed_subset
+                         if getattr(c, "chunk_type", "") == "table_row"
+                         and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
+        _raw_cboxes   = [c for c in embed_subset
+                         if getattr(c, "chunk_type", "") == "checkbox"
+                         and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
+        _raw_sections = [c for c in embed_subset
+                         if getattr(c, "chunk_type", "") in ("section", "paragraph")
+                         and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
+        _raw_other    = [c for c in embed_subset
+                         if getattr(c, "chunk_type", "") not in ("table_row","checkbox","section","paragraph")
+                         and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
+        _raw_pool     = (_raw_tables[:20] + _raw_cboxes[:12] + _raw_sections[:12] + _raw_other[:4])[:48]
         top_chunks = [
             {"text": c.text, "page_start": c.page_start,
              "page_end": c.page_end, "source_file": str(getattr(c, "source_file", "") or "")}

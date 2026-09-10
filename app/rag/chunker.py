@@ -191,8 +191,8 @@ _TABLE_SCAN_KW = frozenset({
     'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
     'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
 })
-_TABLE_PAGE_CAP = 80       # section text scan — capped to match _TABLE_EXTRACT_CAP; prevents GIL saturation on large PDFs
-_TABLE_EXTRACT_CAP = 80   # table extraction — extract_tables() is slow on Azure B2 CPU
+_TABLE_PAGE_CAP = 150      # section text scan — 150 pages covers maintenance chapters in all known manuals
+_TABLE_EXTRACT_CAP = 100  # table extraction — extract_tables() is slow; 100 pages is sufficient for all seen manuals
 
 
 def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:

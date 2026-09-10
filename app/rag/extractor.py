@@ -58,10 +58,12 @@ OUTPUT ONLY a valid JSON array — no explanation, no markdown, no code fences. 
 
 # ── Extraction configuration ──────────────────────────────────────────────────
 
-_CHARS_PER_CHUNK  = 1500   # chars per chunk — smaller input, model focuses better
-_BATCH_SIZE       = 3      # 3 chunks per call — fewer = cleaner JSON, less truncation
-_PER_CALL_TIMEOUT = 150    # seconds per Ollama call before we skip that batch
-_NUM_PREDICT      = 4096   # CRITICAL: must be high enough for 10-15 tasks per batch
+_CHARS_PER_CHUNK       = 1500  # chars per chunk — smaller input, model focuses better
+_BATCH_SIZE_OLLAMA     = 3     # 3B model: small context window, keep batches tiny
+_BATCH_SIZE_IBM        = 8     # 70B model: 128K context — 8 chunks × 1500 chars fits easily
+_PER_CALL_TIMEOUT      = 150   # seconds per Ollama call before we skip that batch
+_IBM_CALL_TIMEOUT      = 120   # seconds per IBM call (cloud API, faster inference)
+_NUM_PREDICT           = 4096  # CRITICAL: must be high enough for 10-15 tasks per batch
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -74,19 +76,25 @@ async def extract_tasks_from_chunks(
 ) -> list[dict]:
     """Extract PM tasks from ALL chunks — complete document coverage.
 
-    Batches chunks in groups of _BATCH_SIZE with _CHARS_PER_CHUNK per chunk.
-    All batches are processed sequentially (Ollama is single-threaded on ACI CPU).
-    Results are merged across all batches and deduplicated.
+    Uses IBM batch size (8 chunks/call) when watsonx is configured — the 70B model
+    handles 8 × 1500 chars comfortably within its 128K context window, cutting call
+    count by ~3x vs Ollama's 3-chunk batches.
+    All batches are sequential (Ollama single-threaded on ACI CPU).
+    Results are merged and deduplicated.
     """
     if not chunks:
         return []
 
+    use_ibm = bool(settings.watsonx_api_key and settings.watsonx_project_id)
+    batch_size = _BATCH_SIZE_IBM if use_ibm else _BATCH_SIZE_OLLAMA
+    logger.info("[extractor] Using %s batch size=%d for %d chunks",
+                "IBM" if use_ibm else "Ollama", batch_size, len(chunks))
+
     all_tasks: list[dict] = []
-    total_batches = (len(chunks) + _BATCH_SIZE - 1) // _BATCH_SIZE
+    total_batches = (len(chunks) + batch_size - 1) // batch_size
 
     for batch_idx in range(total_batches):
-        batch = chunks[batch_idx * _BATCH_SIZE: (batch_idx + 1) * _BATCH_SIZE]
-        # Separate sections clearly so model sees boundaries
+        batch = chunks[batch_idx * batch_size: (batch_idx + 1) * batch_size]
         combined = "\n\n--- SECTION BREAK ---\n\n".join(
             c["text"][:_CHARS_PER_CHUNK] for c in batch
         )
@@ -102,8 +110,8 @@ async def extract_tasks_from_chunks(
         all_tasks.extend(batch_tasks)
 
     final = _deduplicate(all_tasks)
-    logger.info("[extractor] Final: %d unique tasks from %d chunks across %d batches",
-                len(final), len(chunks), total_batches)
+    logger.info("[extractor] Final: %d unique tasks from %d chunks across %d batches (batch_size=%d)",
+                len(final), len(chunks), total_batches, batch_size)
     return final
 
 
@@ -151,7 +159,7 @@ async def _extract_watsonx(
     }
     try:
         headers = await watsonx_headers(settings.watsonx_api_key)
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=_IBM_CALL_TIMEOUT) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             text_out = resp.json()["results"][0]["generated_text"]

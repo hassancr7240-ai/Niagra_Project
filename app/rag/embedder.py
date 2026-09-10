@@ -112,10 +112,12 @@ async def _embed_ollama(chunks: list[TextChunk]) -> list[dict]:
         return None
 
     results: list[dict] = []
-    async with httpx.AsyncClient(timeout=120) as client:
-        responses = await asyncio.gather(*[_embed_one(c, client) for c in chunks])
-    for r in responses:
-        if r:
+    # Short timeout: if Ollama isn't reachable (common when App Service can't hit ACI VNet IP),
+    # fail fast in 10s rather than hanging 120s × N chunks.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+        raw = await asyncio.gather(*[_embed_one(c, client) for c in chunks], return_exceptions=True)
+    for r in raw:
+        if isinstance(r, dict):
             results.append(r)
 
     logger.info("Ollama embedded %d/%d chunks", len(results), len(chunks))

@@ -835,7 +835,11 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] Calling embed_chunks with %d chunks (tables=%d cboxes=%d sections=%d other=%d)",
              manual_id, len(embed_subset), len(_es_tables[:80]), len(_es_cboxes[:60]),
              len(_es_sections[:50]), len(_es_other[:10]))
-    embedded = await embed_chunks(embed_subset)
+    try:
+        embedded = await asyncio.wait_for(embed_chunks(embed_subset), timeout=90)
+    except asyncio.TimeoutError:
+        log.warning("[%s] embed_chunks timed out (90s) — proceeding with raw chunks for AI extraction", manual_id)
+        embedded = []
     log.info("[%s] Embedded %d/%d chunks", manual_id, len(embedded), len(chunks))
     _embedding_failed = len(embedded) == 0 and len(embed_subset) > 0
     if _embedding_failed:

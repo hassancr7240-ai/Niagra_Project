@@ -11,28 +11,45 @@ import pdfplumber
 logger = logging.getLogger(__name__)
 
 _TABLE_TIMEOUT = object()  # sentinel — distinguishes "timed out" from "no tables on page"
-_OCR_MIN_TEXT_CHARS = 50   # pages with fewer extractable chars than this trigger OCR
+# Only trigger OCR when pdfplumber returns almost nothing — truly scanned pages.
+# 50 was too aggressive: pages with diagrams/headers return <50 digital chars but are
+# NOT scanned, causing Tesseract to run on every such page (2–10s each → minutes of hang).
+_OCR_MIN_TEXT_CHARS = 10
+_OCR_PAGE_TIMEOUT_S = 8    # max seconds Tesseract gets per page before we give up
 
 
 def _ocr_page_text(page) -> str:
     """
     Render a pdfplumber page at 200 DPI and run Tesseract OCR on it.
-    Only called when pdfplumber returns fewer than _OCR_MIN_TEXT_CHARS characters.
-    Returns empty string gracefully if pytesseract is not installed.
+    Only called when pdfplumber returns fewer than _OCR_MIN_TEXT_CHARS characters
+    (i.e. the page is essentially blank to pdfplumber — likely truly scanned).
+    Hard 8s timeout per page prevents hanging on complex images.
     """
+    import concurrent.futures
     try:
         import pytesseract
+    except ImportError:
+        return ""
+
+    def _run_ocr():
         img = page.to_image(resolution=200).original
         return pytesseract.image_to_string(img, config="--psm 6") or ""
-    except ImportError:
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(_run_ocr).result(timeout=_OCR_PAGE_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        logger.debug("OCR timed out on page %s (>%ds) — skipping", page.page_number, _OCR_PAGE_TIMEOUT_S)
         return ""
     except Exception as exc:
         logger.debug("OCR failed on page %s: %s", page.page_number, exc)
         return ""
+    finally:
+        ex.shutdown(wait=False)
 
 
 def _get_page_text(page) -> str:
-    """Return page text, falling back to Tesseract OCR for scanned pages."""
+    """Return page text, falling back to Tesseract OCR only for near-empty pages."""
     text = page.extract_text() or ""
     if len(text.strip()) < _OCR_MIN_TEXT_CHARS:
         ocr = _ocr_page_text(page)

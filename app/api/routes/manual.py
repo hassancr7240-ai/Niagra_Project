@@ -916,6 +916,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     log.info("[%s] Sending %d chunks to AI extraction (embedding_ok=%s)",
              manual_id, len(top_chunks), not _embedding_failed)
 
+    await update_fn("EXTRACTING")
     extracted_tasks = await extract_tasks_from_chunks(
         top_chunks,
         manufacturer=classification.manufacturer,

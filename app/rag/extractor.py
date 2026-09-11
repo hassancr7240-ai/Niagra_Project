@@ -61,10 +61,11 @@ OUTPUT ONLY a valid JSON array — no explanation, no markdown, no code fences. 
 _CHARS_PER_CHUNK       = 1500  # chars per chunk — smaller input, model focuses better
 _BATCH_SIZE_OLLAMA     = 3     # 3B model: small context window, keep batches tiny
 _BATCH_SIZE_IBM        = 8     # 70B model: 128K context — 8 chunks × 1500 chars fits easily
-_PER_CALL_TIMEOUT      = 90    # seconds per Ollama call — llama3.2:3b responds within 60s; 90s gives headroom
+_PER_CALL_TIMEOUT      = 55    # seconds per Ollama call — 1024-token output on 3b CPU: ~40s; 55s gives headroom
 _IBM_CALL_TIMEOUT      = 120   # seconds per IBM call (cloud API, faster inference)
-_NUM_PREDICT           = 4096  # CRITICAL: must be high enough for 10-15 tasks per batch
-_EXTRACTION_BUDGET_S   = 300   # 5-minute hard budget for entire extraction; returns partial results on exceed
+_IBM_FALLBACK_TIMEOUT  = 30    # hard cap on entire IBM attempt (IAM + API); fail fast when WML expired
+_NUM_PREDICT           = 1024  # 1024 tokens is enough for 5-8 tasks/batch; much faster than 4096 on CPU
+_EXTRACTION_BUDGET_S   = 180   # 3-minute hard budget; returns partial results on exceed
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -135,11 +136,19 @@ async def _extract_with_fallback(
     model: Optional[str],
     interval_hints: Optional[list[int]],
 ) -> list[dict]:
-    """Try IBM watsonx first; fall back to Ollama if blocked or unavailable."""
+    """Try IBM watsonx first (hard 30s cap); fall back to Ollama if blocked or unavailable."""
     if settings.watsonx_api_key and settings.watsonx_project_id:
-        result = await _extract_watsonx(text, manufacturer, model, interval_hints)
-        if result:
-            return result
+        try:
+            result = await asyncio.wait_for(
+                _extract_watsonx(text, manufacturer, model, interval_hints),
+                timeout=_IBM_FALLBACK_TIMEOUT,
+            )
+            if result:
+                return result
+        except asyncio.TimeoutError:
+            logger.warning("[extractor] IBM timed out (%ds) — falling back to Ollama", _IBM_FALLBACK_TIMEOUT)
+        except Exception as exc:
+            logger.warning("[extractor] IBM failed: %s — falling back to Ollama", exc)
         logger.warning("[extractor] watsonx returned 0 — falling back to Ollama")
     return await _extract_ollama(text, manufacturer, model, interval_hints)
 

@@ -688,14 +688,18 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
         else:
             action_text = desc_upper
 
-        # Area column: "MACHINE NAME- ACTION_VERB" format matching the CON L3 template
-        # e.g. "KRONES SHRINK TUNNEL- INSPECT", "KRONES SHRINK TUNNEL- SAFETY"
+        # Area column: "MACHINE- AREA VERB" format so each functional category is distinct.
+        # e.g. "HUSKY HYPET 5E- SAFETY LOCKOUT", "HUSKY HYPET 5E- BEARING INSPECT",
+        #      "HUSKY HYPET 5E- PUMP CLEAN", "HUSKY HYPET 5E- GENERAL CHECK"
         verb = action_upper.split()[0] if action_upper else ""
         area_upper = (area or "GENERAL").upper().strip()
-        if verb and verb not in ("GENERAL",):
-            display_area = f"{machine_name.upper()}- {verb}"
+        if verb:
+            if area_upper and area_upper not in ("GENERAL",):
+                display_area = f"{machine_name.upper()}- {area_upper} {verb}"
+            else:
+                display_area = f"{machine_name.upper()}- {verb}"
         else:
-            display_area = area_upper
+            display_area = f"{machine_name.upper()}- {area_upper}" if area_upper != "GENERAL" else area_upper
 
         # Append a rotating procedure note so adjacent rows look distinct
         _PROC_VARIANTS = {

@@ -625,6 +625,55 @@ def _merge_box(ws, row, col_start, col_end, row_end=None):
             ws.cell(row=r, column=c).font = _FONT
 
 
+_AREA_COMPONENT_MAP = {
+    "BEARING": "Bearings", "BELT": "Belt", "CHAIN": "Chain", "CLUTCH": "Clutch",
+    "COOLING": "Cooling System", "CONVEYOR": "Conveyor", "DRIVE": "Drive",
+    "ELECTRICAL": "Electrical Components", "FILTER": "Filter",
+    "FRAME": "Frame", "GEARBOX": "Gearbox", "HYDRAULIC": "Hydraulic System",
+    "LUBRICATION": "Lubrication Points", "MOTOR": "Motor",
+    "PNEUMATIC": "Pneumatic System", "PUMP": "Pump", "SEALING": "Seals",
+    "SENSORS": "Sensors", "VALVE": "Valve",
+}
+
+_STOP_WORDS = {
+    "THE", "ALL", "FOR", "AND", "OR", "AS", "IF", "IS", "ON", "IN",
+    "AT", "TO", "OF", "A", "AN", "BE", "BY", "DO", "UP",
+}
+
+
+def _short_function_area(verb: str, area_upper: str, desc_upper: str) -> str:
+    """Return a short human-readable Function/Area label (no machine name prefix).
+    Safety/LOTO tasks → 'Safety'; general tasks → 'General';
+    substantive tasks → e.g. 'Inspect Bearings', 'Clean Vacuum Pump'.
+    """
+    # Safety and LOTO are always "Safety"
+    if area_upper == "SAFETY" or verb in ("LOCKOUT", "CONFIRM"):
+        return "Safety"
+    if area_upper == "GENERAL" or not verb:
+        return "General"
+
+    # Try to extract a component noun phrase from description after the action verb
+    remainder = desc_upper
+    if desc_upper.startswith(verb):
+        remainder = desc_upper[len(verb):].strip(" -:.,")
+
+    # Walk words, skip stop words, collect up to 4 meaningful words
+    component_words = []
+    for word in remainder.split()[:10]:
+        clean = word.rstrip(".,;:-/")
+        if clean and clean not in _STOP_WORDS and not clean.startswith("("):
+            component_words.append(clean.title())
+        if len(component_words) >= 4:
+            break
+
+    if component_words:
+        return f"{verb.title()} {' '.join(component_words)}"
+
+    # Fallback: verb + mapped component name
+    component = _AREA_COMPONENT_MAP.get(area_upper, area_upper.title())
+    return f"{verb.title()} {component}"
+
+
 def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
                       interval_hours=None, work_order=None,
                       technician_name=None, generated_at=None,
@@ -688,18 +737,12 @@ def _write_xlsx_sheet(ws, machine_name, interval_label, tasks,
         else:
             action_text = desc_upper
 
-        # Area column: "MACHINE- AREA VERB" format so each functional category is distinct.
-        # e.g. "HUSKY HYPET 5E- SAFETY LOCKOUT", "HUSKY HYPET 5E- BEARING INSPECT",
-        #      "HUSKY HYPET 5E- PUMP CLEAN", "HUSKY HYPET 5E- GENERAL CHECK"
+        # Area column: short meaningful task name, no machine prefix.
+        # Safety/LOTO tasks → "Safety"; general wrap-up → "General";
+        # substantive tasks → "Action + Component" e.g. "Inspect Bearings", "Clean Pump"
         verb = action_upper.split()[0] if action_upper else ""
         area_upper = (area or "GENERAL").upper().strip()
-        if verb:
-            if area_upper and area_upper not in ("GENERAL",):
-                display_area = f"{machine_name.upper()}- {area_upper} {verb}"
-            else:
-                display_area = f"{machine_name.upper()}- {verb}"
-        else:
-            display_area = f"{machine_name.upper()}- {area_upper}" if area_upper != "GENERAL" else area_upper
+        display_area = _short_function_area(verb, area_upper, desc_upper)
 
         # Append a rotating procedure note so adjacent rows look distinct
         _PROC_VARIANTS = {

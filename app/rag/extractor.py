@@ -59,13 +59,13 @@ OUTPUT ONLY a valid JSON array — no explanation, no markdown, no code fences. 
 # ── Extraction configuration ──────────────────────────────────────────────────
 
 _CHARS_PER_CHUNK       = 1500  # chars per chunk — smaller input, model focuses better
-_BATCH_SIZE_OLLAMA     = 3     # 3B model: small context window, keep batches tiny
+_BATCH_SIZE_OLLAMA     = 5     # 3B model: 5 × 1500 chars = 7500 chars fits in 8K context
 _BATCH_SIZE_IBM        = 8     # 70B model: 128K context — 8 chunks × 1500 chars fits easily
 _PER_CALL_TIMEOUT      = 55    # seconds per Ollama call — 1024-token output on 3b CPU: ~40s; 55s gives headroom
 _IBM_CALL_TIMEOUT      = 120   # seconds per IBM call (cloud API, faster inference)
-_IBM_FALLBACK_TIMEOUT  = 30    # hard cap on entire IBM attempt (IAM + API); fail fast when WML expired
+_IBM_FALLBACK_TIMEOUT  = 90    # seconds per IBM batch call — 70B model needs up to 60s; 90s gives headroom
 _NUM_PREDICT           = 1024  # 1024 tokens is enough for 5-8 tasks/batch; much faster than 4096 on CPU
-_EXTRACTION_BUDGET_S   = 180   # 3-minute hard budget; returns partial results on exceed
+_EXTRACTION_BUDGET_S   = 600   # 10-minute budget — allows 6+ batches × 90s timeout each
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ async def _extract_with_fallback(
     model: Optional[str],
     interval_hints: Optional[list[int]],
 ) -> list[dict]:
-    """Try IBM watsonx first (hard 30s cap); fall back to Ollama if blocked or unavailable."""
+    """IBM watsonx only — no Ollama fallback. Returns [] and logs clearly if IBM is unavailable."""
     if settings.watsonx_api_key and settings.watsonx_project_id:
         try:
             result = await asyncio.wait_for(
@@ -145,12 +145,16 @@ async def _extract_with_fallback(
             )
             if result:
                 return result
+            logger.error("[extractor] IBM watsonx returned 0 tasks — key may be disabled or WML plan expired")
+            return []
         except asyncio.TimeoutError:
-            logger.warning("[extractor] IBM timed out (%ds) — falling back to Ollama", _IBM_FALLBACK_TIMEOUT)
+            logger.error("[extractor] IBM watsonx timed out after %ds — WML service not responding", _IBM_FALLBACK_TIMEOUT)
+            return []
         except Exception as exc:
-            logger.warning("[extractor] IBM failed: %s — falling back to Ollama", exc)
-        logger.warning("[extractor] watsonx returned 0 — falling back to Ollama")
-    return await _extract_ollama(text, manufacturer, model, interval_hints)
+            logger.error("[extractor] IBM watsonx FAILED: %s", exc)
+            return []
+    logger.error("[extractor] IBM credentials not configured — set WATSONX_API_KEY and WATSONX_PROJECT_ID")
+    return []
 
 
 # ── IBM watsonx.ai ────────────────────────────────────────────────────────────
@@ -176,7 +180,7 @@ async def _extract_watsonx(
         "model_id": settings.watsonx_model_generation,
         "project_id": settings.watsonx_project_id,
         "input": prompt,
-        "parameters": {"max_new_tokens": 4000, "temperature": 0, "repetition_penalty": 1.1},
+        "parameters": {"max_new_tokens": 1500, "temperature": 0, "repetition_penalty": 1.1},
     }
     try:
         headers = await watsonx_headers(settings.watsonx_api_key)
@@ -184,7 +188,9 @@ async def _extract_watsonx(
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             text_out = resp.json()["results"][0]["generated_text"]
-            validated = _validate_tasks(json.loads(_extract_json_array(text_out)))
+            logger.debug("[extractor] IBM raw output (%.200s)", text_out.replace('\n', '↵'))
+            parsed = _extract_json_array(text_out)
+            validated = _validate_tasks(json.loads(parsed))
             logger.info("[extractor] watsonx → %d tasks from %d chars", len(validated), len(text))
             return validated
     except Exception as exc:
@@ -214,29 +220,34 @@ async def _extract_ollama(
         f"Manual text:\n{text}\n\n"
         "OUTPUT ONLY A JSON ARRAY. No explanation. No markdown. No code fences. Start with [ and end with ]."
     )
+    def _sync_call() -> str:
+        """Synchronous httpx call — runs in a thread so asyncio.wait_for cancels it reliably."""
+        import httpx as _httpx
+        with _httpx.Client(timeout=_httpx.Timeout(_PER_CALL_TIMEOUT, connect=5.0)) as c:
+            r = c.post(url, json={
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": _NUM_PREDICT},
+            })
+            r.raise_for_status()
+            return r.json().get("response", "")
+
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(_PER_CALL_TIMEOUT, connect=5.0)) as client:
-            resp = await asyncio.wait_for(
-                client.post(url, json={
-                    "model": settings.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0, "num_predict": _NUM_PREDICT},
-                }),
-                timeout=_PER_CALL_TIMEOUT,
-            )
-            resp.raise_for_status()
-            text_out = resp.json().get("response", "")
-            # Strip markdown code fences small models sometimes add
-            text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
-            try:
-                tasks = json.loads(_extract_json_array(text_out))
-            except json.JSONDecodeError as je:
-                logger.error("[extractor] Ollama JSON parse failed (%s) — raw: %.300s", je, text_out)
-                return []
-            validated = _validate_tasks(tasks)
-            logger.info("[extractor] Ollama → %d tasks from %d chars", len(validated), len(text))
-            return validated
+        text_out = await asyncio.wait_for(
+            asyncio.to_thread(_sync_call),
+            timeout=_PER_CALL_TIMEOUT,
+        )
+        # Strip markdown code fences small models sometimes add
+        text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
+        try:
+            tasks = json.loads(_extract_json_array(text_out))
+        except json.JSONDecodeError as je:
+            logger.error("[extractor] Ollama JSON parse failed (%s) — raw: %.300s", je, text_out)
+            return []
+        validated = _validate_tasks(tasks)
+        logger.info("[extractor] Ollama → %d tasks from %d chars", len(validated), len(text))
+        return validated
     except asyncio.TimeoutError:
         logger.warning("[extractor] Ollama timed out after %ds — skipping batch", _PER_CALL_TIMEOUT)
         return []
@@ -268,18 +279,46 @@ def _deduplicate(tasks: list[dict]) -> list[dict]:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_json_array(text: str) -> str:
-    """Pull the first [...] JSON array out of a model response.
-    If the array is truncated (model hit token limit), recover completed objects.
+    """Pull the first complete [...] JSON array out of a model response.
+    Uses bracket counting so greedy regex doesn't capture multiple arrays.
+    Falls back to recovering complete objects if the array is truncated.
     """
-    m = re.search(r"\[[\s\S]*\]", text)
-    if m:
-        return m.group(0)
-    # Truncated output — find the opening bracket and recover completed objects
+    # Strip markdown code fences (IBM sometimes wraps output in ```json ... ```)
+    text = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
+
     start = text.find("[")
     if start == -1:
+        objects = re.findall(r'\{[^{}]*\}', text)
+        if objects:
+            logger.warning("[extractor] No array found — recovered %d objects", len(objects))
+            return "[" + ",".join(objects) + "]"
         return "[]"
+
+    # Walk forward with bracket + string tracking to find the first COMPLETE array
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start=start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+
+    # Unclosed array — recover completed objects
     fragment = text[start:]
-    # Find all complete {...} objects and rebuild a valid array from them
     objects = re.findall(r'\{[^{}]*\}', fragment)
     if objects:
         logger.warning("[extractor] JSON truncated — recovered %d objects from partial output", len(objects))

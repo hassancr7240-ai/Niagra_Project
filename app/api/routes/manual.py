@@ -184,8 +184,8 @@ async def get_upload_status_light(manual_id: str, user: CurrentUserDep, db: DBDe
 
     _status_labels = {
         "UPLOADED":   (10, "Uploaded — starting pipeline…"),
-        "CLASSIFYING": (25, "Classifying document…"),
-        "CHUNKING":   (45, "Splitting into chunks…"),
+        "CLASSIFYING": (25, "Extracting text & classifying manufacturer…"),
+        "CHUNKING":   (45, "Smart chunking — tables, headings, checkboxes…"),
         "EMBEDDING":  (65, "Generating embeddings…"),
         "EXTRACTING": (85, "Extracting PM tasks…"),
         "PENDING_REVIEW": (100, "Processing complete — ready to generate documents!"),
@@ -721,13 +721,13 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     _fname_upper_m = pdf_path.name.upper()
     _file_size_mb = pdf_path.stat().st_size / (1024 * 1024)
-    log.info("[%s] file=%.1fMB — extracting text (150-page cap)", manual_id, _file_size_mb)
+    log.info("[%s] file=%.1fMB — extracting text (50-page cap)", manual_id, _file_size_mb)
     try:
         full_text, _offsets = await asyncio.wait_for(
-            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=480  # 8 min max — then SQL fallback
+            asyncio.to_thread(extract_text_from_pdf, pdf_path), timeout=120  # 2 min max for 50 pages
         )
     except asyncio.TimeoutError:
-        log.warning("[%s] Text extraction timed out (8 min) — falling back to SQL/Excel library", manual_id)
+        log.warning("[%s] Text extraction timed out (2 min) — falling back to SQL/Excel library", manual_id)
         full_text, _offsets = "", {}
     except Exception as _te:
         log.warning("[%s] Text extraction failed: %s — using empty text", manual_id, _te)
@@ -859,7 +859,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         if ctype == "toc":
             return False
         stripped = (text or "").strip()
-        if len(stripped) < 80:
+        # Checkboxes are naturally short (e.g. "Check belt tension — 8hr") — allow 30 chars
+        min_len = 30 if ctype == "checkbox" else 80
+        if len(stripped) < min_len:
             return False
         # Pure page-number / figure-reference lines ― no task content
         if re.match(r'^(?:fig(?:ure)?|table|see\s|refer to|page|p\.)\s', stripped, re.I):
@@ -882,11 +884,10 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _emb_other    = [e for e in embedded
                          if e.get("chunk_type") not in ("table_row", "checkbox", "section", "paragraph")
                          and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
-        # 20 tables + 12 checkboxes + 12 sections + 4 other = 48 max
-        # Smaller pool than before (was 60) → max 16 Ollama batches @ 90s = ~24 min worst-case,
-        # but extractor's 5-min budget stops it early and returns partial results.
-        _extraction_pool = (_emb_tables[:20] + _emb_cboxes[:12] +
-                            _emb_sections[:12] + _emb_other[:4])[:48]
+        # 15 tables + 25 checkboxes + 15 sections + 5 other = 60 max
+        # IBM 70b: batch=8, ~30-60s/batch → 8 batches × 90s timeout = 12 min max (within 600s budget)
+        _extraction_pool = (_emb_tables[:15] + _emb_cboxes[:25] +
+                            _emb_sections[:15] + _emb_other[:5])[:60]
         top_chunks = [
             {"text": e["text"], "page_start": e.get("page_start", 0),
              "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
@@ -906,7 +907,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _raw_other    = [c for c in embed_subset
                          if getattr(c, "chunk_type", "") not in ("table_row","checkbox","section","paragraph")
                          and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
-        _raw_pool     = (_raw_tables[:20] + _raw_cboxes[:12] + _raw_sections[:12] + _raw_other[:4])[:48]
+        _raw_pool     = (_raw_tables[:15] + _raw_cboxes[:25] + _raw_sections[:15] + _raw_other[:5])[:60]
         top_chunks = [
             {"text": c.text, "page_start": c.page_start,
              "page_end": c.page_end, "source_file": str(getattr(c, "source_file", "") or "")}
@@ -924,17 +925,9 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         interval_hints=interval_hints,
     )
 
-    # Table fallback: run whenever AI returned 0, regardless of chunking fallback
+    # IBM-only mode: no table fallback — IBM must work for task extraction
     if not extracted_tasks:
-        log.warning("[%s] AI returned 0 tasks — trying table-based fallback", manual_id)
-        _table_fut = asyncio.ensure_future(asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path))
-        try:
-            extracted_tasks = await asyncio.wait_for(asyncio.shield(_table_fut), timeout=120)
-        except asyncio.TimeoutError:
-            log.warning("[%s] Table-based fallback timed out (120s) — skipping", manual_id)
-            extracted_tasks = []
-        if extracted_tasks:
-            log.info("[%s] Table fallback extracted %d tasks", manual_id, len(extracted_tasks))
+        log.error("[%s] IBM watsonx returned 0 tasks — check credentials and WML service plan", manual_id)
 
     # HyPET reference Excel fallback: AI on a scanned HyPET PDF yields very few tasks.
     # Load the manager-validated reference schedule and merge — AI tasks at intervals

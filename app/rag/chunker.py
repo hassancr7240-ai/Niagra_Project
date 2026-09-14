@@ -208,8 +208,8 @@ _TABLE_SCAN_KW = frozenset({
     'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
     'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
 })
-_TABLE_PAGE_CAP = 150      # section text scan — 150 pages covers maintenance chapters in all known manuals
-_TABLE_EXTRACT_CAP = 100  # table extraction — extract_tables() is slow; 100 pages is sufficient for all seen manuals
+_TABLE_PAGE_CAP = 80       # section text scan — 80 pages covers PM chapters; reduced to prevent OOM on large PDFs
+_TABLE_EXTRACT_CAP = 50   # table extraction — extract_tables() is slow and memory-heavy; 50 pages is sufficient
 
 
 def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:
@@ -829,7 +829,7 @@ def _docling_md_to_chunks(
     return chunks
 
 
-_TEXT_PAGE_CAP = 150  # extract text from at most this many pages (covers deep PM sections e.g. Tetra Pak p111)
+_TEXT_PAGE_CAP = 50   # first 50 pages always contains manufacturer/model for classification
 _TEXT_CHAR_CAP = 60000  # stop reading pages once we have this many chars
 
 

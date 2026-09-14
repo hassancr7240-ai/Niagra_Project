@@ -39,11 +39,13 @@ _FEW_SHOT = """CORRECT OUTPUT EXAMPLES:
   {"task_no":70,"area":"GEARBOX","action":"REPLACE","description":"REPLACE GEARBOX OIL — USE MOBIL SHC 636 SYNTHETIC GEAR OIL","machine_state":"POWERED_OFF","safety_flag":true,"part_number":null,"interval_hours":6000}
 ]"""
 
-_SYSTEM_PROMPT = f"""You are an expert industrial maintenance engineer. Extract ALL Preventive Maintenance (PM) tasks from the machine manual text below.
+_SYSTEM_PROMPT = f"""You are an expert industrial maintenance engineer. You will be given multiple sections from a machine manual separated by "--- SECTION BREAK ---". Extract EVERY Preventive Maintenance (PM) task found ANYWHERE in ALL sections.
+
+CRITICAL: This document may contain 50-200+ maintenance tasks. You MUST extract ALL of them. Do NOT stop early.
 
 EXTRACTION RULES:
-1. Extract EVERY task explicitly mentioned — do NOT skip any, even if similar ones appear.
-2. Do NOT invent tasks not in the text.
+1. Scan ALL sections — every task in every section must appear in the output.
+2. Do NOT invent tasks not in the text. Do NOT skip tasks that are in the text.
 3. interval_hours: use EXACT number from text. Convert: 8hr=1 day, 120hr=1 week, 240hr=2 weeks, 500hr=1 month, 1500hr=3 months, 3000hr=6 months, 6000hr=1 year, 12000hr=2 years, 42000hr=7 years. Default 500 if not stated.
 4. machine_state: RUNNING=task done while machine produces | STOPPED=machine halted but powered | POWERED_OFF=full LOTO/lockout required.
 5. safety_flag: true if LOTO, lockout, tagout, de-energise, or entering danger zone required.
@@ -54,18 +56,18 @@ EXTRACTION RULES:
 
 {_FEW_SHOT}
 
-OUTPUT ONLY a valid JSON array — no explanation, no markdown, no code fences. Start with [ and end with ]."""
+OUTPUT ONLY a valid JSON array — no explanation, no markdown, no code fences. Start with [ and end with ]. Include EVERY task from ALL sections above."""
 
 # ── Extraction configuration ──────────────────────────────────────────────────
 
-_CHARS_PER_CHUNK       = 1500  # chars per chunk — smaller input, model focuses better
+_CHARS_PER_CHUNK       = 1500  # chars per chunk
 _BATCH_SIZE_OLLAMA     = 5     # 3B model: 5 × 1500 chars = 7500 chars fits in 8K context
-_BATCH_SIZE_IBM        = 8     # 70B model: 128K context — 8 chunks × 1500 chars fits easily
-_PER_CALL_TIMEOUT      = 55    # seconds per Ollama call — 1024-token output on 3b CPU: ~40s; 55s gives headroom
-_IBM_CALL_TIMEOUT      = 120   # seconds per IBM call (cloud API, faster inference)
-_IBM_FALLBACK_TIMEOUT  = 90    # seconds per IBM batch call — 70B model needs up to 60s; 90s gives headroom
-_NUM_PREDICT           = 1024  # 1024 tokens is enough for 5-8 tasks/batch; much faster than 4096 on CPU
-_EXTRACTION_BUDGET_S   = 1200  # 20-minute budget — allows 13+ batches for full-document coverage
+_BATCH_SIZE_IBM        = 30    # 70B model: 128K context — 30 × 1500 = 45K chars, extracts 50-80 tasks/batch
+_PER_CALL_TIMEOUT      = 55    # seconds per Ollama call
+_IBM_CALL_TIMEOUT      = 180   # seconds per IBM call — 4096 output tokens needs up to 2.5 min
+_IBM_FALLBACK_TIMEOUT  = 150   # seconds per IBM batch — 30 chunks × potential 80 tasks needs time
+_NUM_PREDICT           = 1024  # Ollama: 1024 tokens
+_EXTRACTION_BUDGET_S   = 1200  # 20-min budget — 6 batches × 30 chunks = all 180 chunks covered
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -180,7 +182,7 @@ async def _extract_watsonx(
         "model_id": settings.watsonx_model_generation,
         "project_id": settings.watsonx_project_id,
         "input": prompt,
-        "parameters": {"max_new_tokens": 1500, "temperature": 0, "repetition_penalty": 1.1},
+        "parameters": {"max_new_tokens": 4096, "temperature": 0, "repetition_penalty": 1.1},
     }
     try:
         headers = await watsonx_headers(settings.watsonx_api_key)

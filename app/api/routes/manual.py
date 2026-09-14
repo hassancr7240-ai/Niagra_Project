@@ -961,72 +961,12 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     if not extracted_tasks:
         log.error("[%s] IBM watsonx AND table extractor returned 0 tasks — check PDF quality and IBM credentials", manual_id)
 
-    # HyPET reference Excel fallback: AI on a scanned HyPET PDF yields very few tasks.
-    # Load the manager-validated reference schedule and merge — AI tasks at intervals
-    # not covered by the Excel are kept; the Excel provides the complete base set.
-    if is_hypet and len(extracted_tasks) < 10:
-        log.info("[%s] HyPET detected with <10 AI tasks — loading reference Excel", manual_id)
-        try:
-            _hypet_tasks = await asyncio.to_thread(_extract_hypet_direct)
-            if _hypet_tasks:
-                if not extracted_tasks:
-                    extracted_tasks = _hypet_tasks
-                else:
-                    _hypet_intervals = {t["interval_hours"] for t in _hypet_tasks}
-                    _ai_only = [t for t in extracted_tasks if t.get("interval_hours") not in _hypet_intervals]
-                    extracted_tasks = _hypet_tasks + _ai_only
-                log.info("[%s] HyPET reference: %d tasks total", manual_id, len(extracted_tasks))
-        except Exception as _he:
-            log.warning("[%s] HyPET reference load failed: %s", manual_id, _he)
-
-    # Mark AI-extracted tasks with source so UI can distinguish them
+    # All tasks come from the uploaded PDF only (IBM + direct table parser).
+    # No PM Library fallback, no HyPET Excel — every task is sourced from this document.
     for _t in extracted_tasks:
         _t.setdefault("_source", "ai_extracted")
 
-    # PM Library: always load and supplement AI results with intervals AI didn't cover.
-    # Pure fallback if AI returned 0; supplement otherwise (adds 8hr daily checks,
-    # 2000hr overhaul tasks, etc. that rarely appear as checkbox items in the PDF text).
-    _lib_machine_id = inferred_machine_id
-    if _lib_machine_id:
-        try:
-            async with _ASL() as _db2:
-                _res2 = await _db2.execute(
-                    _dtext(
-                        "SELECT task_no, area, action, description, machine_state,"
-                        " safety_flag, part_number, interval_hours"
-                        " FROM tasks WHERE machine_id=:mid ORDER BY interval_hours, task_no"
-                    ),
-                    {"mid": _lib_machine_id},
-                )
-                _lib_rows = _res2.fetchall()
-            if _lib_rows:
-                _lib_tasks = [
-                    {
-                        "task_no": r[0], "area": r[1] or "GENERAL",
-                        "action": r[2] or "CHECK", "description": r[3] or "",
-                        "machine_state": r[4] or "STOPPED", "safety_flag": bool(r[5]),
-                        "part_number": r[6], "interval_hours": r[7] or 500,
-                        "_source": "pm_library",
-                    }
-                    for r in _lib_rows
-                ]
-                if not extracted_tasks:
-                    # Pure fallback: AI found nothing at all
-                    extracted_tasks = _lib_tasks
-                    log.info("[%s] PM Library fallback (pure): %d tasks for %s",
-                             manual_id, len(extracted_tasks), _lib_machine_id)
-                else:
-                    # Always include ALL PM Library tasks PLUS any AI tasks at
-                    # intervals the PM Library doesn't have (e.g. 42000hr, 45000hr).
-                    # Never drop PM Library tasks just because AI found a few at
-                    # the same interval — the library has the complete set.
-                    _lib_intervals = {t["interval_hours"] for t in _lib_tasks}
-                    _ai_only = [t for t in extracted_tasks if t.get("interval_hours") not in _lib_intervals]
-                    extracted_tasks = _lib_tasks + _ai_only
-                    log.info(
-                        "[%s] PM Library base (%d) + AI-only intervals (%d) → %d total",
-                        manual_id, len(_lib_tasks), len(_ai_only), len(extracted_tasks),
-                    )
+    log.info("[%s] PURE AI extraction complete: %d tasks (all from uploaded PDF)", manual_id, len(extracted_tasks))
         except Exception as _le:
             log.warning("[%s] PM Library load failed: %s", manual_id, _le)
 

@@ -884,10 +884,10 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _emb_other    = [e for e in embedded
                          if e.get("chunk_type") not in ("table_row", "checkbox", "section", "paragraph")
                          and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
-        # 15 tables + 25 checkboxes + 15 sections + 5 other = 60 max
-        # IBM 70b: batch=8, ~30-60s/batch → 8 batches × 90s timeout = 12 min max (within 600s budget)
-        _extraction_pool = (_emb_tables[:15] + _emb_cboxes[:25] +
-                            _emb_sections[:15] + _emb_other[:5])[:60]
+        # 80 tables + 60 checkboxes + 30 sections + 10 other = 180 max
+        # IBM 70b: batch=8, ~90s/batch → 23 batches × 90s = 2070s → budget 1200s → ~13 batches = 104 chunks
+        _extraction_pool = (_emb_tables[:80] + _emb_cboxes[:60] +
+                            _emb_sections[:30] + _emb_other[:10])[:180]
         top_chunks = [
             {"text": e["text"], "page_start": e.get("page_start", 0),
              "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
@@ -907,7 +907,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _raw_other    = [c for c in embed_subset
                          if getattr(c, "chunk_type", "") not in ("table_row","checkbox","section","paragraph")
                          and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
-        _raw_pool     = (_raw_tables[:15] + _raw_cboxes[:25] + _raw_sections[:15] + _raw_other[:5])[:60]
+        _raw_pool     = (_raw_tables[:80] + _raw_cboxes[:60] + _raw_sections[:30] + _raw_other[:10])[:180]
         top_chunks = [
             {"text": c.text, "page_start": c.page_start,
              "page_end": c.page_end, "source_file": str(getattr(c, "source_file", "") or "")}
@@ -925,9 +925,41 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         interval_hints=interval_hints,
     )
 
-    # IBM-only mode: no table fallback — IBM must work for task extraction
+    log.info("[%s] IBM extracted %d tasks from chunks", manual_id, len(extracted_tasks))
+
+    # Direct PDF table extraction — reads ALL maintenance schedule tables from the PDF.
+    # This is a fast local parse (pdfplumber), NOT the SQL library.
+    # Runs for every machine type (table extractor handles any PM table format).
+    # IBM handles text/checkbox sections; table extractor handles structured PM tables.
+    _table_tasks: list[dict] = []
+    try:
+        _table_tasks = await asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path)
+        log.info("[%s] Direct table extraction: %d tasks from PDF tables", manual_id, len(_table_tasks))
+    except Exception as _te:
+        log.warning("[%s] Direct table extraction failed: %s", manual_id, _te)
+
+    if _table_tasks:
+        for _t in _table_tasks:
+            _t.setdefault("_source", "pdf_table")
+        if not extracted_tasks:
+            extracted_tasks = _table_tasks
+        else:
+            # Union: keep ALL IBM tasks + table tasks not duplicated by description
+            _seen_desc = {
+                re.sub(r'\s+', ' ', (t.get('description') or '')).upper()[:80]
+                for t in extracted_tasks
+            }
+            _new_from_table = [
+                t for t in _table_tasks
+                if re.sub(r'\s+', ' ', (t.get('description') or '')).upper()[:80] not in _seen_desc
+            ]
+            extracted_tasks = extracted_tasks + _new_from_table
+            log.info("[%s] After merge: IBM=%d + table-new=%d → %d total",
+                     manual_id, len(extracted_tasks) - len(_new_from_table),
+                     len(_new_from_table), len(extracted_tasks))
+
     if not extracted_tasks:
-        log.error("[%s] IBM watsonx returned 0 tasks — check credentials and WML service plan", manual_id)
+        log.error("[%s] IBM watsonx AND table extractor returned 0 tasks — check PDF quality and IBM credentials", manual_id)
 
     # HyPET reference Excel fallback: AI on a scanned HyPET PDF yields very few tasks.
     # Load the manager-validated reference schedule and merge — AI tasks at intervals

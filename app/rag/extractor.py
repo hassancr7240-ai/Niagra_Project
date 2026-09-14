@@ -65,7 +65,7 @@ _PER_CALL_TIMEOUT      = 55    # seconds per Ollama call — 1024-token output o
 _IBM_CALL_TIMEOUT      = 120   # seconds per IBM call (cloud API, faster inference)
 _IBM_FALLBACK_TIMEOUT  = 90    # seconds per IBM batch call — 70B model needs up to 60s; 90s gives headroom
 _NUM_PREDICT           = 1024  # 1024 tokens is enough for 5-8 tasks/batch; much faster than 4096 on CPU
-_EXTRACTION_BUDGET_S   = 600   # 10-minute budget — allows 6+ batches × 90s timeout each
+_EXTRACTION_BUDGET_S   = 1200  # 20-minute budget — allows 13+ batches for full-document coverage
 
 
 # ── Public entry point ────────────────────────────────────────────────────────

@@ -933,8 +933,13 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     # IBM handles text/checkbox sections; table extractor handles structured PM tables.
     _table_tasks: list[dict] = []
     try:
-        _table_tasks = await asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path)
+        _table_tasks = await asyncio.wait_for(
+            asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path),
+            timeout=90,
+        )
         log.info("[%s] Direct table extraction: %d tasks from PDF tables", manual_id, len(_table_tasks))
+    except asyncio.TimeoutError:
+        log.warning("[%s] Direct table extraction timed out (90s) — using IBM tasks only", manual_id)
     except Exception as _te:
         log.warning("[%s] Direct table extraction failed: %s", manual_id, _te)
 

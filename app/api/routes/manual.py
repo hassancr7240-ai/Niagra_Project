@@ -967,8 +967,6 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _t.setdefault("_source", "ai_extracted")
 
     log.info("[%s] PURE AI extraction complete: %d tasks (all from uploaded PDF)", manual_id, len(extracted_tasks))
-        except Exception as _le:
-            log.warning("[%s] PM Library load failed: %s", manual_id, _le)
 
     # Renumber task_no sequentially within each interval so there are no duplicates
     # after merging AI tasks with PM Library supplement tasks.

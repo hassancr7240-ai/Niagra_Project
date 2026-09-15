@@ -963,11 +963,46 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
                      manual_id, len(extracted_tasks) - len(_new_from_table),
                      len(_new_from_table), len(extracted_tasks))
 
+    # Tetra Pak PMRSPL direct extractor — reads the PMRSPL maintenance schedule table
+    # directly from the uploaded PDF (NOT from any database). Tetra Pak hides their
+    # full PM schedule in a multi-page positional table; IBM misses most of it because
+    # the chunks lose the column structure. PMRSPL parser recovers all 100+ tasks.
+    if is_tetra:
+        _pmrspl_tasks: list[dict] = []
+        try:
+            _pmrspl_tasks = await asyncio.wait_for(
+                asyncio.to_thread(_extract_pmrspl_direct, pdf_path),
+                timeout=120,
+            )
+            log.info("[%s] PMRSPL direct extraction: %d tasks from Tetra Pak PDF", manual_id, len(_pmrspl_tasks))
+        except asyncio.TimeoutError:
+            log.warning("[%s] PMRSPL extraction timed out (120s)", manual_id)
+        except Exception as _pe:
+            log.warning("[%s] PMRSPL extraction failed: %s", manual_id, _pe)
+        if _pmrspl_tasks:
+            for _t in _pmrspl_tasks:
+                _t.setdefault("_source", "pdf_table")
+            if not extracted_tasks:
+                extracted_tasks = _pmrspl_tasks
+            else:
+                _seen_desc = {
+                    re.sub(r'\s+', ' ', (t.get('description') or '')).upper()[:80]
+                    for t in extracted_tasks
+                }
+                _new_pmrspl = [
+                    t for t in _pmrspl_tasks
+                    if re.sub(r'\s+', ' ', (t.get('description') or '')).upper()[:80] not in _seen_desc
+                ]
+                extracted_tasks = extracted_tasks + _new_pmrspl
+                log.info("[%s] After PMRSPL merge: IBM=%d + pmrspl-new=%d → %d total",
+                         manual_id, len(extracted_tasks) - len(_new_pmrspl),
+                         len(_new_pmrspl), len(extracted_tasks))
+
     if not extracted_tasks:
         log.error("[%s] IBM watsonx AND table extractor returned 0 tasks — check PDF quality and IBM credentials", manual_id)
 
-    # All tasks come from the uploaded PDF only (IBM + direct table parser).
-    # No PM Library fallback, no HyPET Excel — every task is sourced from this document.
+    # All tasks come from the uploaded PDF only (IBM + specialized PDF parsers).
+    # No PM Library fallback — every task is sourced from this document.
     for _t in extracted_tasks:
         _t.setdefault("_source", "ai_extracted")
 

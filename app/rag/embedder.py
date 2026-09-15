@@ -91,7 +91,8 @@ async def _embed_watsonx(chunks: list[TextChunk]) -> list[dict]:
         payload = {
             "model_id": settings.watsonx_embedding_model,
             "project_id": settings.watsonx_project_id,
-            "inputs": [c.text for c in batch],
+            # IBM slate-125m max 512 tokens (~1900 chars). Truncate to avoid 400.
+            "inputs": [c.text[:1800] for c in batch],
         }
         try:
             resp = await asyncio.wait_for(

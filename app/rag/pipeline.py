@@ -986,7 +986,12 @@ def _finalize(raw: list[dict]) -> list[dict]:
 _PM_PAGE_KEYWORDS = re.compile(
     r"maintenance schedule|preventive maintenance|service interval|lubrication schedule"
     r"|pm interval|pm schedule|wartungsplan|wartungsintervall"
-    r"|\b500\s*h|\b1000\s*h|\b2000\s*h|\b4000\s*h|\b2,500\s*h|\binterval",
+    r"|scheduled maintenance|maintenance plan|inspection schedule"
+    r"|lubrication chart|maintenance chart|service schedule"
+    r"|pm tasks|pm table|inspection interval|check interval"
+    r"|every\s+\d+\s*(?:hours?|hrs?|h\b)|every\s+\d+\s*(?:months?|weeks?|years?)"
+    r"|\b500\s*h|\b1000\s*h|\b2000\s*h|\b2,500\s*h|\b4000\s*h|\b8000\s*h|\b500\s*hr"
+    r"|\binterval|\bfrequency|\bwartung|\binspektion",
     re.IGNORECASE,
 )
 
@@ -995,16 +1000,22 @@ def _pm_candidate_pages(pdf) -> list:
     """
     Two-pass: quick text scan to find pages with PM schedule keywords,
     then return only those pages (plus ±2 neighbours) for table extraction.
-    Falls back to full PDF if no candidates found.
+    Falls back to first 300 pages if no candidates found (prevents timeout
+    on 800-page PDFs where full-scan would take 60+ minutes).
+    Keyword scan has a 25s budget so large PDFs don't stall here.
     """
+    import time
     candidates: set[int] = set()
+    _scan_deadline = time.monotonic() + 25
     for i, page in enumerate(pdf.pages):
+        if time.monotonic() > _scan_deadline:
+            break
         txt = page.extract_text() or ""
         if _PM_PAGE_KEYWORDS.search(txt):
             for nb in range(max(0, i - 1), min(len(pdf.pages), i + 3)):
                 candidates.add(nb)
     if not candidates:
-        return pdf.pages  # no keyword match — scan all (slow but safe)
+        return pdf.pages[:300]  # cap fallback — first 300 pages covers most PM schedules
     return [pdf.pages[i] for i in sorted(candidates)]
 
 
@@ -1169,12 +1180,13 @@ _BULLET_RE = re.compile(
 def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
     """
     Last resort: regex-match "every X hours: <task>" patterns in page text.
-    Handles narrative-style manuals (Krones/Eisbar English/German).
+    Handles narrative-style manuals (Krones/Eisbar English/German, HyPET, PTF).
+    Uses _pm_candidate_pages (keyword-filtered + 300-page cap) to avoid timeout.
     """
     raw: list[dict] = []
     current_interval: int = 0
 
-    for page in pdf.pages:
+    for page in _pm_candidate_pages(pdf):
         text = page.extract_text() or ""
 
         # Find interval anchors ("Every 500 hours:", "every 45,000 hours:")

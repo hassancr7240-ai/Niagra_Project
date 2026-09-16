@@ -836,25 +836,32 @@ def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
     """
     import pdfplumber
 
-    tasks: list[dict] = []
+    # Run ALL three strategies and merge — do NOT stop at first success.
+    # A partial table-header match returns 7 tasks; text patterns may return 80 more.
+    all_raw: list[dict] = []
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
-            tasks = _try_header_table(pdf, pdf_path)
-            if not tasks:
-                tasks = _try_generic_table(pdf, pdf_path)
-            if not tasks:
-                tasks = _try_text_patterns(pdf, pdf_path)
+            t1 = _try_header_table(pdf, pdf_path)
+            t2 = _try_generic_table(pdf, pdf_path)
+            t3 = _try_text_patterns(pdf, pdf_path)
+            all_raw = t1 + t2 + t3
+            logger.info("PDF strategies: header=%d generic=%d text=%d from %s",
+                        len(t1), len(t2), len(t3), pdf_path.name)
     except Exception as exc:
         logger.error("Table extraction failed for %s: %s", pdf_path.name, exc)
 
-    logger.info("Generalized fallback: %d tasks from %s", len(tasks), pdf_path.name)
-    return tasks
+    combined = _finalize(all_raw) if all_raw else []
+    logger.info("Generalized fallback: %d tasks (after dedup) from %s", len(combined), pdf_path.name)
+    return combined
 
 
 # ── Column-header keywords ────────────────────────────────────────────────────
 
 _INTERVAL_HEADERS = {"interval", "intervall", "frequency", "frequenz", "cycle",
-                     "hours", "stunden", "hrs", "period"}
+                     "hours", "stunden", "hrs", "period",
+                     "daily", "täglich", "weekly", "wöchentlich",
+                     "monthly", "monatlich", "annual", "jährlich",
+                     "quarterly", "semi-annual", "schedule"}
 _ACTION_HEADERS   = {"action", "aktion", "work", "task", "operation", "activity",
                      "maintenance", "wartung"}
 _DESC_HEADERS     = {"description", "beschreibung", "detail", "instruction",
@@ -1107,6 +1114,51 @@ def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
                         raw.append(t)
                 except (ValueError, IndexError, TypeError):
                     continue
+
+    # ── Sub-strategy 1b: interval-as-columns format ─────────────────────────────
+    # Many PM tables have INTERVALS as column headers (Daily | Weekly | 500h | 2500h)
+    # with checkmarks in rows. E.g. HyPET, Krones, PTF, shrink tunnel.
+    # Detect: ≥2 columns whose headers parse as intervals; desc col is the leftmost.
+    _CHECKMARK_RE = re.compile(r'^[✓✔☑xX●•\*oO1Yy]$')
+
+    for page in _pm_candidate_pages(pdf):
+        for table in _safe_extract_tables(page):
+            if not table or len(table) < 3:
+                continue
+            hdr = [str(c or "").strip() for c in table[0]]
+            # Map col index → interval hours for columns that are interval headers
+            iv_cols: dict[int, int] = {}
+            for ci, cell in enumerate(hdr):
+                iv = _chunk_detect_interval(cell)
+                if iv and iv >= 8:
+                    iv_cols[ci] = iv
+                # Also handle plain numeric like "2,500" or "2500" with no unit in header
+                elif re.match(r'^\d{2,6}$', cell.replace(',', '').replace('.', '')):
+                    try:
+                        v = int(cell.replace(',', '').replace('.', ''))
+                        if v in _VALID_INTERVALS or _snap_interval(v) in _VALID_INTERVALS:
+                            iv_cols[ci] = _snap_interval(v)
+                    except (ValueError, TypeError):
+                        pass
+            if len(iv_cols) < 2:
+                continue  # not an interval-column table
+            # Leftmost non-interval column = task description
+            desc_col = next((ci for ci in range(len(hdr)) if ci not in iv_cols), 0)
+            for row in table[1:]:
+                if not row:
+                    continue
+                cells = [str(c or "").strip() for c in row]
+                desc = cells[desc_col] if desc_col < len(cells) else ""
+                if not desc or len(desc) < 5:
+                    continue
+                for ci, iv in iv_cols.items():
+                    if ci >= len(cells):
+                        continue
+                    cell_val = cells[ci].strip()
+                    if _CHECKMARK_RE.match(cell_val) or cell_val.lower() in {"yes", "x", "1", "true"}:
+                        t = _build_task(0, _detect_area(desc), _detect_action_verb(desc), desc, iv)
+                        if t:
+                            raw.append(t)
 
     logger.info("Header-table strategy: %d raw tasks from %s", len(raw), pdf_path.name)
     return _finalize(raw) if raw else []

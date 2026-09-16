@@ -884,10 +884,11 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _emb_other    = [e for e in embedded
                          if e.get("chunk_type") not in ("table_row", "checkbox", "section", "paragraph")
                          and _is_useful_for_extraction(e.get("text",""), e.get("chunk_type",""))]
-        # 80 tables + 60 checkboxes + 30 sections + 10 other = 180 max
-        # IBM 70b: batch=8, ~90s/batch → 23 batches × 90s = 2070s → budget 1200s → ~13 batches = 104 chunks
-        _extraction_pool = (_emb_tables[:80] + _emb_cboxes[:60] +
-                            _emb_sections[:30] + _emb_other[:10])[:180]
+        # 80 tables + 60 sections + 30 checkboxes + 10 other = 180 max
+        # Section/paragraph chunks are ~1500 chars (10× more IBM context than 132-char checkboxes).
+        # IBM gets 30×1500=45K chars/batch instead of 30×132=4K — critical for extracting 50-100+ tasks.
+        _extraction_pool = (_emb_tables[:80] + _emb_sections[:60] +
+                            _emb_cboxes[:30] + _emb_other[:10])[:180]
         top_chunks = [
             {"text": e["text"], "page_start": e.get("page_start", 0),
              "page_end": e.get("page_end", 0), "source_file": e.get("source_file", "")}
@@ -907,7 +908,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         _raw_other    = [c for c in embed_subset
                          if getattr(c, "chunk_type", "") not in ("table_row","checkbox","section","paragraph")
                          and _is_useful_for_extraction(c.text, getattr(c, "chunk_type",""))]
-        _raw_pool     = (_raw_tables[:80] + _raw_cboxes[:60] + _raw_sections[:30] + _raw_other[:10])[:180]
+        _raw_pool     = (_raw_tables[:80] + _raw_sections[:60] + _raw_cboxes[:30] + _raw_other[:10])[:180]
         top_chunks = [
             {"text": c.text, "page_start": c.page_start,
              "page_end": c.page_end, "source_file": str(getattr(c, "source_file", "") or "")}

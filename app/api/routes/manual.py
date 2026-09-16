@@ -915,6 +915,54 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
             for c in _raw_pool
         ]
 
+    # ── PM-candidate page full-scan ─────────────────────────────────────────────
+    # IBM above only sees chunks from pages 1-120. PM schedules often live on
+    # pages 200-500. Keyword-scan the FULL PDF, extract text from every PM page,
+    # and prepend those chunks so IBM sees the actual maintenance schedule.
+    # Works for ANY machine type regardless of manufacturer. No fallback needed —
+    # if the PDF is image-based these pages return "" and get silently skipped.
+    def _scan_pm_pages_for_ibm() -> list[dict]:
+        import pdfplumber as _plumber, time as _t
+        from app.rag.pipeline import _pm_candidate_pages as _find_pm_pages, _PM_PAGE_KEYWORDS
+        _deadline = _t.monotonic() + 100  # 100s — keyword scan 60s + text extract 40s
+        result: list[dict] = []
+        try:
+            with _plumber.open(str(pdf_path)) as _pdf:
+                _pm_pages = _find_pm_pages(_pdf)
+                for _page in _pm_pages:
+                    if _t.monotonic() > _deadline:
+                        break
+                    _txt = _page.extract_text() or ""
+                    if len(_txt.strip()) < 50:
+                        continue  # skip image/diagram pages silently
+                    result.append({
+                        "text": _txt[:3000],
+                        "page_start": _page.page_number,
+                        "page_end": _page.page_number,
+                        "source_file": str(pdf_path.name),
+                    })
+        except Exception as _scan_err:
+            log.warning("[%s] PM-page scan error: %s", manual_id, _scan_err)
+        return result
+
+    try:
+        _pm_text_chunks = await asyncio.wait_for(
+            asyncio.to_thread(_scan_pm_pages_for_ibm),
+            timeout=120,
+        )
+        log.info("[%s] PM-page scan: %d pages with extractable text", manual_id, len(_pm_text_chunks))
+        if _pm_text_chunks:
+            _covered_pages = {c.get("page_start", -1) for c in top_chunks}
+            _new_pm = [c for c in _pm_text_chunks if c["page_start"] not in _covered_pages]
+            # Prepend — IBM sees PM pages first, boosting task yield dramatically
+            top_chunks = _new_pm[:120] + top_chunks
+            log.info("[%s] Added %d new PM-page chunks → %d total for IBM",
+                     manual_id, len(_new_pm), len(top_chunks))
+    except asyncio.TimeoutError:
+        log.warning("[%s] PM-page scan timed out (120s) — skipping", manual_id)
+    except Exception as _pmte:
+        log.warning("[%s] PM-page scan failed: %s", manual_id, _pmte)
+
     log.info("[%s] Sending %d chunks to AI extraction (embedding_ok=%s)",
              manual_id, len(top_chunks), not _embedding_failed)
 

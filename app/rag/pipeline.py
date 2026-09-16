@@ -997,8 +997,14 @@ _PM_PAGE_KEYWORDS = re.compile(
     r"|lubrication chart|maintenance chart|service schedule"
     r"|pm tasks|pm table|inspection interval|check interval"
     r"|every\s+\d+\s*(?:hours?|hrs?|h\b)|every\s+\d+\s*(?:months?|weeks?|years?)"
-    r"|\b500\s*h|\b1000\s*h|\b2000\s*h|\b2,500\s*h|\b4000\s*h|\b8000\s*h|\b500\s*hr"
-    r"|\binterval|\bfrequency|\bwartung|\binspektion",
+    r"|\b500\s*h\b|\b1000\s*h\b|\b2000\s*h\b|\b2,500\s*h\b|\b4000\s*h\b|\b8000\s*h\b|\b500\s*hr\b"
+    r"|\binterval|\bfrequency|\bwartung|\binspektion"
+    r"|daily\s+maintenance|weekly\s+maintenance|monthly\s+maintenance"
+    r"|täglich|wöchentlich|monatlich|jährlich"
+    r"|service\s+chart|pm\s+checklist|maintenance\s+checklist|maintenance\s+tasks"
+    r"|replace\s+filter|check\s+oil|change\s+oil|grease\s+bearing|lubricate\s+chain"
+    r"|(\d{3,5})\s*(?:hr|h)\s*(?:maintenance|service|inspection|pm)"
+    r"|(\d{3,5})\s*(?:hour|hours)\s*(?:maintenance|service|inspection)",
     re.IGNORECASE,
 )
 
@@ -1217,23 +1223,45 @@ _TEXT_INTERVAL_RE = re.compile(
     r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
     re.IGNORECASE,
 )
+# "500h – task" or "500 h: inspect valves" shortform (common in Krones/PTF)
+_TEXT_SHORTFORM_RE = re.compile(
+    r"(?:^|\n)\s*(\d{2,6})\s*h(?:rs?)?\s*[-:–]\s*(.{10,200}?)(?=\n|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# "every 3 months / every 6 months" — convert to hours (1 month ≈ 500h)
+_TEXT_MONTH_RE = re.compile(
+    r"(?:every|alle|each|nach)\s+(\d{1,2})\s*months?\b"
+    r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
+    re.IGNORECASE,
+)
+# "every N weeks" — convert to hours (1 week ≈ 120h)
+_TEXT_WEEK_RE = re.compile(
+    r"(?:every|alle|each|nach)\s+(\d{1,2})\s*weeks?\b"
+    r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|alle|$)",
+    re.IGNORECASE,
+)
 # Matches "every 7 years:", "approx. every 7-year maintenance:"
 _TEXT_YEAR_RE = re.compile(
     r"(?:approx\.?\s+)?(?:every\s+)?(\d+)\s*[-–]?\s*years?\b"
     r"\s*[:\-–]?\s*(.{10,200}?)(?=\n|every|$)",
     re.IGNORECASE,
 )
+# Section header like "500 Hour Maintenance" or "Daily Maintenance" anchors bullets below
+_SECTION_IV_RE = re.compile(
+    r"(\d{1,6}[,.]?\d{0,3})\s*[-–]?\s*(?:hour|hr|h)\s*(?:preventive\s+)?(?:maintenance|service|inspection|pm)\b",
+    re.IGNORECASE,
+)
 _BULLET_RE = re.compile(
-    r"(?:^|\n)\s*[•–\-\*]\s*(.{10,200}?)(?=\n|$)",
+    r"(?:^|\n)\s*(?:[•–\-\*]|\d{1,2}[\.\)])\s*(.{10,200}?)(?=\n|$)",
     re.IGNORECASE,
 )
 
 
 def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
     """
-    Last resort: regex-match "every X hours: <task>" patterns in page text.
-    Handles narrative-style manuals (Krones/Eisbar English/German, HyPET, PTF).
-    Uses _pm_candidate_pages (keyword-filtered + 300-page cap) to avoid timeout.
+    Text-pattern extractor: regex-match PM task patterns from page text.
+    Handles all narrative/hybrid formats: hours, months, weeks, years, shortforms.
+    Uses _pm_candidate_pages (keyword-filtered) to avoid timeout.
     """
     raw: list[dict] = []
     current_interval: int = 0
@@ -1241,10 +1269,9 @@ def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
     for page in _pm_candidate_pages(pdf):
         text = page.extract_text() or ""
 
-        # Find interval anchors ("Every 500 hours:", "every 45,000 hours:")
+        # Pattern 1: "every N hours: <task>" (English + German)
         for m in _TEXT_INTERVAL_RE.finditer(text):
             try:
-                # Strip thousands separators: "45,000" → 45000, "4.000" → 4000
                 hrs_raw = int(m.group(1).replace(',', '').replace('.', ''))
             except (ValueError, AttributeError):
                 continue
@@ -1259,7 +1286,58 @@ def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
                 if t:
                     raw.append(t)
 
-        # "every 7 years: replace sensors" style
+        # Pattern 2: "500h – clean filters" shortform (Krones/PTF/value-pack style)
+        for m in _TEXT_SHORTFORM_RE.finditer(text):
+            try:
+                hrs_raw = int(m.group(1).replace(',', '').replace('.', ''))
+            except (ValueError, AttributeError):
+                continue
+            snapped = _snap_interval(hrs_raw)
+            if snapped not in _VALID_INTERVALS:
+                continue
+            task_text = m.group(2).strip()
+            if len(task_text) > 10:
+                current_interval = snapped
+                t = _build_task(0, _detect_area(task_text),
+                                _detect_action_verb(task_text), task_text, snapped)
+                if t:
+                    raw.append(t)
+
+        # Pattern 3: "every N months" — 1 month ≈ 500h
+        for m in _TEXT_MONTH_RE.finditer(text):
+            try:
+                months = int(m.group(1))
+            except (ValueError, AttributeError):
+                continue
+            hrs = _snap_interval(months * 500)
+            if hrs not in _VALID_INTERVALS:
+                continue
+            task_text = m.group(2).strip()
+            if len(task_text) > 10:
+                current_interval = hrs
+                t = _build_task(0, _detect_area(task_text),
+                                _detect_action_verb(task_text), task_text, hrs)
+                if t:
+                    raw.append(t)
+
+        # Pattern 4: "every N weeks" — 1 week ≈ 120h
+        for m in _TEXT_WEEK_RE.finditer(text):
+            try:
+                weeks = int(m.group(1))
+            except (ValueError, AttributeError):
+                continue
+            hrs = _snap_interval(weeks * 120)
+            if hrs not in _VALID_INTERVALS:
+                continue
+            task_text = m.group(2).strip()
+            if len(task_text) > 10:
+                current_interval = hrs
+                t = _build_task(0, _detect_area(task_text),
+                                _detect_action_verb(task_text), task_text, hrs)
+                if t:
+                    raw.append(t)
+
+        # Pattern 5: "every 7 years: replace sensors"
         for m in _TEXT_YEAR_RE.finditer(text):
             try:
                 yr = int(m.group(1))
@@ -1275,7 +1353,17 @@ def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
                     raw.append(t)
                     current_interval = snapped
 
-        # Collect bullet points under current interval
+        # Pattern 6: section header "500 Hour Maintenance" → sets anchor interval
+        for m in _SECTION_IV_RE.finditer(text):
+            try:
+                hrs_raw = int(m.group(1).replace(',', '').replace('.', ''))
+                snapped = _snap_interval(hrs_raw)
+                if snapped in _VALID_INTERVALS:
+                    current_interval = snapped
+            except (ValueError, AttributeError):
+                pass
+
+        # Pattern 7: bullets/numbered items under current interval anchor
         if current_interval:
             for m in _BULLET_RE.finditer(text):
                 task_text = m.group(1).strip()

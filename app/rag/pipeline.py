@@ -1013,7 +1013,7 @@ def _pm_candidate_pages(pdf) -> list:
     """
     import time
     candidates: set[int] = set()
-    _scan_deadline = time.monotonic() + 25
+    _scan_deadline = time.monotonic() + 60  # 60s budget scans ~500 pages — covers deep appendices
     for i, page in enumerate(pdf.pages):
         if time.monotonic() > _scan_deadline:
             break
@@ -1022,7 +1022,7 @@ def _pm_candidate_pages(pdf) -> list:
             for nb in range(max(0, i - 1), min(len(pdf.pages), i + 3)):
                 candidates.add(nb)
     if not candidates:
-        return pdf.pages[:300]  # cap fallback — first 300 pages covers most PM schedules
+        return pdf.pages[:600]  # cap fallback — 600 pages covers manuals where keywords are absent
     return [pdf.pages[i] for i in sorted(candidates)]
 
 

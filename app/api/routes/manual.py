@@ -936,7 +936,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     try:
         _table_tasks = await asyncio.wait_for(
             asyncio.to_thread(_extract_tasks_from_pdf_tables, pdf_path),
-            timeout=150,
+            timeout=300,  # 5 min — keyword scan now runs 60s + up to 300 pages of table extraction
         )
         log.info("[%s] Direct table extraction: %d tasks from PDF tables", manual_id, len(_table_tasks))
     except asyncio.TimeoutError:

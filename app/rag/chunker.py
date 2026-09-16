@@ -208,8 +208,8 @@ _TABLE_SCAN_KW = frozenset({
     'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
     'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
 })
-_TABLE_PAGE_CAP = 80       # section text scan — 80 pages covers PM chapters; reduced to prevent OOM on large PDFs
-_TABLE_EXTRACT_CAP = 50   # table extraction — extract_tables() is slow and memory-heavy; 50 pages is sufficient
+_TABLE_PAGE_CAP = 400      # section text scan — HyPET PM schedule is pages 400+; must scan deep into manual
+_TABLE_EXTRACT_CAP = 400  # table extraction — keyword gate already skips non-PM pages, 400 covers large manuals
 
 
 def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:

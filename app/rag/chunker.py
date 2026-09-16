@@ -208,8 +208,8 @@ _TABLE_SCAN_KW = frozenset({
     'grease', 'oil', 'torque', 'tighten', 'inspect', 'calibrate',
     'hrs', 'betriebsstunden', 'überprüfen', 'wechseln',
 })
-_TABLE_PAGE_CAP = 400      # section text scan — HyPET PM schedule is pages 400+; must scan deep into manual
-_TABLE_EXTRACT_CAP = 400  # table extraction — keyword gate already skips non-PM pages, 400 covers large manuals
+_TABLE_PAGE_CAP = 120      # section text scan — first 120 pages for IBM context chunks (fast)
+_TABLE_EXTRACT_CAP = 80   # table extraction — keyword gate skips non-PM pages; bulk PM tasks come from pipeline.py
 
 
 def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_version: str = "") -> list[TextChunk]:
@@ -221,11 +221,15 @@ def _extract_table_chunks(pdf, source_file: str, manual_id: str = "", manual_ver
     extract_tables() call.  Hard cap at _TABLE_PAGE_CAP pages so
     very large PDFs don't take 10+ minutes.
     """
+    import time as _time
     chunks: list[TextChunk] = []
     idx = 0
     _consecutive_timeouts = 0
+    _table_deadline = _time.monotonic() + 120  # 120s max — prevents hang on PDFs with many tables
 
     for page in pdf.pages[:_TABLE_EXTRACT_CAP]:
+        if _time.monotonic() > _table_deadline:
+            break
         pn = page.page_number
         # Fast gate: only run the slow extract_tables() on pages that
         # actually contain maintenance-related text.  Uses OCR for scanned pages.
@@ -416,7 +420,11 @@ def _extract_section_chunks(
             chunks.append(sub)
             idx += 1
 
+    import time as _time
+    _section_deadline = _time.monotonic() + 90  # 90s max for section scan — prevents 15-min hang on large PDFs
     for page in pdf.pages[:_TABLE_PAGE_CAP]:
+        if _time.monotonic() > _section_deadline:
+            break
         pn = page.page_number
         for line in _get_page_text(page).split('\n'):
             stripped = line.strip()

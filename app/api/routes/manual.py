@@ -832,7 +832,7 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
     _es_sections = [c for c in chunks if c.chunk_type in ("section", "paragraph")]
     _es_other    = [c for c in chunks if c.chunk_type not in
                     ("table_row", "checkbox", "section", "paragraph")]
-    embed_subset = (_es_tables[:80] + _es_cboxes[:60] + _es_sections[:50] + _es_other[:10])[:200]
+    embed_subset = (_es_tables[:80] + _es_sections[:60] + _es_cboxes[:50] + _es_other[:10])[:200]
     log.info("[%s] Calling embed_chunks with %d chunks (tables=%d cboxes=%d sections=%d other=%d)",
              manual_id, len(embed_subset), len(_es_tables[:80]), len(_es_cboxes[:60]),
              len(_es_sections[:50]), len(_es_other[:10]))

@@ -17,7 +17,7 @@ from app.utils.security import compute_bytes_hash, sanitize_filename
 router = APIRouter(prefix="/api/manual", tags=["Manual Upload / RAG"])
 
 _ALLOWED_TYPES = {"application/pdf", "application/octet-stream"}
-_MAX_FILE_MB = 50
+_MAX_FILE_MB = 100
 
 
 def _basic_pdf_safety_check(content: bytes) -> bool:

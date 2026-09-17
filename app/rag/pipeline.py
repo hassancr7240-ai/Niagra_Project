@@ -833,17 +833,44 @@ def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
          and an action/description column
       3. Text-pattern fallback — regex over page text for "Xh / every X hours"
          maintenance bullets (handles German/English narrative manuals)
+
+    Hard timeout: 120s per strategy to prevent pdfplumber hangs on malformed PDFs.
     """
     import pdfplumber
+    import time
 
     # Run ALL three strategies and merge — do NOT stop at first success.
-    # A partial table-header match returns 7 tasks; text patterns may return 80 more.
     all_raw: list[dict] = []
+    deadline = time.monotonic() + 360  # 6 min hard cap for entire extraction
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
-            t1 = _try_header_table(pdf, pdf_path)
-            t2 = _try_generic_table(pdf, pdf_path)
-            t3 = _try_text_patterns(pdf, pdf_path)
+            t1 = []
+            t2 = []
+            t3 = []
+
+            # Each strategy gets max 120s
+            if time.monotonic() < deadline:
+                try:
+                    t1_deadline = time.monotonic() + 120
+                    t1 = _try_header_table(pdf, pdf_path)
+                except Exception as e:
+                    logger.warning("Header table extraction failed: %s", e)
+                    t1 = []
+
+            if time.monotonic() < deadline:
+                try:
+                    t2 = _try_generic_table(pdf, pdf_path)
+                except Exception as e:
+                    logger.warning("Generic table extraction failed: %s", e)
+                    t2 = []
+
+            if time.monotonic() < deadline:
+                try:
+                    t3 = _try_text_patterns(pdf, pdf_path)
+                except Exception as e:
+                    logger.warning("Text pattern extraction failed: %s", e)
+                    t3 = []
+
             all_raw = t1 + t2 + t3
             logger.info("PDF strategies: header=%d generic=%d text=%d from %s",
                         len(t1), len(t2), len(t3), pdf_path.name)
@@ -1038,9 +1065,14 @@ def _try_header_table(pdf, pdf_path: Path) -> list[dict]:
     keywords. Once found, use those column indices to parse all subsequent rows.
     Works for PMRSPL (Tetra Pak), German Krones service lists, Husky HyPET, etc.
     """
+    import time
     raw: list[dict] = []
+    deadline = time.monotonic() + 120  # 120s per-strategy timeout
 
     for page in _pm_candidate_pages(pdf):
+        if time.monotonic() > deadline:
+            logger.warning("Header table strategy timeout — stopping early")
+            break
         for table in _safe_extract_tables(page):
             if not table or len(table) < 2:
                 continue
@@ -1177,9 +1209,14 @@ def _try_generic_table(pdf, pdf_path: Path) -> list[dict]:
     No header found — scan tables for rows where one cell is a 2–5-digit
     number in _VALID_INTERVALS range and another cell contains action text.
     """
+    import time
     raw: list[dict] = []
+    deadline = time.monotonic() + 120  # 120s per-strategy timeout
 
     for page in _pm_candidate_pages(pdf):
+        if time.monotonic() > deadline:
+            logger.warning("Generic table strategy timeout — stopping early")
+            break
         for table in _safe_extract_tables(page):
             if not table:
                 continue
@@ -1263,10 +1300,15 @@ def _try_text_patterns(pdf, pdf_path: Path) -> list[dict]:
     Handles all narrative/hybrid formats: hours, months, weeks, years, shortforms.
     Uses _pm_candidate_pages (keyword-filtered) to avoid timeout.
     """
+    import time
     raw: list[dict] = []
     current_interval: int = 0
+    deadline = time.monotonic() + 120  # 120s per-strategy timeout
 
     for page in _pm_candidate_pages(pdf):
+        if time.monotonic() > deadline:
+            logger.warning("Text pattern strategy timeout — stopping early")
+            break
         text = page.extract_text() or ""
 
         # Pattern 1: "every N hours: <task>" (English + German)

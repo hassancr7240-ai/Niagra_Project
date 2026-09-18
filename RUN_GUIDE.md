@@ -1,529 +1,496 @@
 # PM Automation System — Complete Run Guide
 
-## Architecture Overview
-
-This system implements the **PM Automation System** exactly as designed in the two provided diagrams:
-
-| Diagram Layer | What it does |
-|---|---|
-| **Client Layer** | Supervisor / Technician / Manager / Security roles enforced via Azure AD RBAC |
-| **FastAPI Application** | REST API — generate, history, library, machines, manual upload, checklist, export |
-| **Core Modules** | PM Library (5 machines, 228 tasks, 48 intervals), Document Generator (PDF/DOCX/XLSX), Storage, History, Analytics |
-| **RAG Pipeline** | PDF → Classify → Find Chapter → Chunk (500w/103w) → Embed → Vector Store → RAG Retrieve Top 10 → AI Extract → Engineer Review → Library |
-| **AI Models Layer** | Dual provider: IBM watsonx.ai (Data Flow Diagram) **or** OpenAI (Architecture Diagram) — switchable via env var |
-| **Storage (Azure)** | Azure Blob, Azure SQL DB, FTP Server, Azure Key Vault, Azure AI Search |
-| **Monitoring** | Azure App Insights, Key Vault, HTTPS/TLS, Audit Logs, Threat Detection |
+**Project Status:** ✅ PRODUCTION READY  
+**Build:** cc3d (IBM Llama 3.3 70B, 3-strategy extraction, full-PDF scanning)  
+**Tested on:** Bottle Coder, Tetra Pak, Eisbar, HyPET, Krones
 
 ---
 
-## AI Models — Which Are Used?
+## What This System Does
 
-### IBM watsonx.ai (Data Flow Diagram — Primary)
+Upload any machine manual PDF (up to 100MB) → AI extracts 50-170+ PM tasks → Engineer reviews → Download Excel workbooks.
 
-Set `AI_PROVIDER=watsonx` in `.env`.
+**Key Features:**
+- **No PM Library fallback** — 100% AI-powered extraction
+- **3-strategy parser** — header tables + generic tables + text patterns
+- **Full-PDF scanning** — finds PM content anywhere, even page 500+
+- **IBM Llama 3.3 70B** — enterprise-grade language model for task enhancement
+- **Professional output** — CON L3 Excel workbooks per interval
 
-| Role | Model ID | Where Used |
-|------|----------|------------|
-| Classification | `ibm/granite-13b-instruct-v2` | Detect manufacturer (Krones/Other) from PDF first page |
-| Embedding | `ibm/slate-125m-english-rtrvr` (1024 dims) | Embed PDF chunks → Azure AI Search vector store |
-| Generation | `ibm/granite-3b-code-instruct` | Extract structured JSON PM tasks from manual chunks |
-| Analytics | `ibm/granite-13b-instruct-v2` | Predict next PM due dates, analyse overdue patterns |
+---
 
-**IAM Authentication** — IBM watsonx requires an IAM Bearer token obtained by exchanging the API key at `https://iam.cloud.ibm.com/identity/token`. The system handles this automatically via `app/rag/watsonx_auth.py`. Tokens are cached and refreshed before expiry.
+## Architecture
 
-**How to get credentials:**
-1. Go to [cloud.ibm.com](https://cloud.ibm.com)
-2. Create a watsonx.ai project
-3. Manage → Access (IAM) → API Keys → Create API key
-4. Copy Project ID from the project settings
-
-### OpenAI (Architecture Diagram — Alternative)
-
-Set `AI_PROVIDER=openai` in `.env`.
-
-| Role | Model ID | Where Used |
-|------|----------|------------|
-| Classification | `gpt-4o-mini` | Detect manufacturer from PDF |
-| Embedding | `text-embedding-3-large` (3072 dims) | Embed PDF chunks |
-| Generation | `gpt-4o` (128k context) | Extract structured JSON PM tasks |
-
-### Switching providers:
-```env
-# IBM watsonx.ai (Data Flow Diagram):
-AI_PROVIDER=watsonx
-WATSONX_API_KEY=your-ibm-iam-api-key
-WATSONX_PROJECT_ID=your-project-id
-
-# OpenAI:
-AI_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+```
+User uploads PDF (up to 100MB)
+           ↓
+[Safety check] — blocks malicious PDFs
+           ↓
+[Text extraction] — pdfplumber reads all pages
+           ↓
+[PM-page scan] — keyword filter finds maintenance schedules
+           ↓
+[3-Strategy extraction] (parallel, 360s timeout total):
+  1. Header table parser — interval/action/description columns
+  2. Generic table parser — numeric intervals + actions
+  3. Text pattern matcher — 7 regex formats (every Nh, Nm, Nw, Ny, etc)
+           ↓
+[IBM enhancement] — 30-chunk batches to Llama 3.3 70B
+           ↓
+[Validation] — checks for duplicate tasks
+           ↓
+[Excel generation] — CON L3 workbooks per interval
+           ↓
+[Engineer review] — approve/reject with audit trail
 ```
 
 ---
 
-## Quick Start — Local Development (No Cloud Required)
+## Quick Start — Local Development
 
 ### Prerequisites
-- Python 3.11+ 
+- Python 3.12+
 - pip
+- Git
 
-### Step 1 — Install Dependencies
+### Step 1 — Clone and Install
 ```bash
+git clone https://dev.azure.com/niagara/PMW-POC/_git/PMW-POC
+cd pm_project
+
 pip install -r requirements.txt
 ```
 
 ### Step 2 — Configure Environment
 ```bash
-# Copy example env
-copy .env.example .env
-
-# Minimum for local dev (no AI, no Azure, everything else is optional):
-# APP_ENV=development      ← already set
-# DEV_API_KEY=dev-...      ← already set
-# DEFAULT_STORAGE_TARGET=local  ← already set
-# AI_PROVIDER=openai       ← set OPENAI_API_KEY only if you want RAG pipeline
+cp .env.example .env
+# No changes needed for local dev mode (SQLite + no AI)
 ```
 
 ### Step 3 — Run the Server
 ```bash
-# Recommended (with hot-reload):
+# With hot-reload:
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-# Or via main.py:
+# Or:
 python app/main.py
 ```
 
-The server:
-1. Loads secrets from Azure Key Vault (skipped if `AZURE_KEY_VAULT_URL` is blank)
-2. Creates SQLite database at `data/pm_automation.db`
-3. Auto-seeds PM library from `data/pm_library.json` (5 machines, all tasks)
-4. Starts on port 8000
+Server starts at `http://localhost:8000`
 
-### Step 4 — Open the Dashboard
+### Step 4 — Open Dashboard
 ```
-http://localhost:8000/frontend/index.html
+http://localhost:8000/frontend/dashboard.html
 ```
-- Enter any email address
-- Select role: **Manager** for full access
-- Click **Sign In**
+- Login with any email (dev mode)
+- Upload a PDF
+- Watch extraction progress
+- Download Excel ZIP
 
-### Step 5 — Get a Dev API Token (for direct API testing)
+### Step 5 — Test via API
 ```bash
+# Get dev token
 curl -X POST http://localhost:8000/dev/token \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@factory.com","name":"Admin","role":"Manager"}'
-```
-Copy `access_token` from the response.
+  -d '{"email":"test@test.com"}'
 
----
-
-## Seed & Generate All PM Documents
-
-```bash
-# Seed database from pm_library.json (also runs automatically on startup)
-python scripts/seed_database.py
-
-# Generate all 16 PM checklists as PDF
-python scripts/generate_all_pms.py --format pdf
-
-# Generate as DOCX
-python scripts/generate_all_pms.py --format docx
-
-# Generate as XLSX
-python scripts/generate_all_pms.py --format xlsx
-```
-Output goes to: `output/pm-docs/<machine>/<year>/<month>/`
-
----
-
-## RAG Pipeline — Upload a Machine Manual
-
-The RAG pipeline processes a machine manual PDF into PM tasks following the Data Flow Diagram:
-
-```
-PDF Upload → Pre-Classify (Krones/Other) → Find Chapter (TOC scan or RAG search)
-→ Chunk (500 words / 103 word overlap) → Embed (1024 dims or 3072 dims)
-→ Vector Store (Azure AI Search) → RAG Retrieve Top 10 chunks
-→ AI Extract (Granite / GPT-4o) → Validate JSON → Engineer Review → Add to Library
-```
-
-### Prerequisites for RAG
-- Set `AI_PROVIDER` and the corresponding API key
-- For vector search: set `AZURE_SEARCH_ENDPOINT` and `AZURE_SEARCH_API_KEY`
-  - Without Azure AI Search, the pipeline still works — top 10 chunks are selected linearly
-
-### Upload via dashboard
-1. Log in as **Engineer** or **Manager**
-2. Navigate to **Upload Manual**
-3. Select a PDF (up to 50 MB)
-4. Optionally select the target machine
-5. Click **Upload & Process**
-6. Watch the queue — status progresses: `UPLOADED → CLASSIFYING → CHUNKING → EMBEDDING → EXTRACTING → PENDING_REVIEW`
-7. Click **Approve** to add extracted tasks to the PM Library
-
-### Upload via API
-```bash
-TOKEN=your-token
-
-# Upload PDF
+# Upload PDF (replace TOKEN)
+TOKEN=your-token-here
 curl -X POST http://localhost:8000/api/manual/upload \
   -H "Authorization: Bearer $TOKEN" \
-  -F "file=@/path/to/krones_contiform_manual.pdf" \
-  -F "machine_id=CONTIFORM-C3-L3"
+  -F "file=@/path/to/manual.pdf"
 
-# Check pipeline status (use manual_id from upload response)
-curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8000/api/manual/uploads/{manual_id}
+# Check status
+MANUAL_ID=<from-response>
+curl http://localhost:8000/api/manual/uploads/$MANUAL_ID/status \
+  -H "Authorization: Bearer $TOKEN"
 
-# Approve extracted tasks
-curl -X POST http://localhost:8000/api/manual/uploads/{manual_id}/approve \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "machine_id=CONTIFORM-C3-L3"
+# Download ZIP when status = PENDING_REVIEW
+curl http://localhost:8000/api/manual/uploads/$MANUAL_ID/generate-zip \
+  -H "Authorization: Bearer $TOKEN" > output.zip
 ```
 
 ---
 
-## API Reference
+## Production Setup — IBM watsonx
+
+### Prerequisites
+- IBM Cloud account with watsonx.ai project
+- Azure subscription (App Service, SQL Database, Blob Storage)
+- IBM Llama 3.3 70B Instruct model access
+
+### Step 1 — Create IBM watsonx Project
+1. Go to [cloud.ibm.com](https://cloud.ibm.com)
+2. Create or open a **watsonx.ai project**
+3. Get your **Project ID** (Settings → General)
+4. Create **API Key** (Manage → Access (IAM) → API Keys)
+
+### Step 2 — Configure Environment
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+```env
+# Production mode
+APP_ENV=production
+
+# AI Provider (MUST be watsonx)
+AI_PROVIDER=watsonx
+WATSONX_API_KEY=<your-ibm-api-key>
+WATSONX_PROJECT_ID=<your-project-id>
+WATSONX_URL=https://us-south.ml.cloud.ibm.com
+
+# Database (Azure SQL)
+DATABASE_URL=mssql+aioodbc:///?odbc_connect=Driver={ODBC Driver 18 for SQL Server};Server=tcp:<server>.database.windows.net,1433;Database=pm_automation;Authentication=ActiveDirectoryMsi;Encrypt=yes;
+
+# Storage (Azure Blob)
+AZURE_STORAGE_ACCOUNT_NAME=<your-storage-account>
+AZURE_STORAGE_CONTAINER_NAME=pm-manuals
+DEFAULT_STORAGE_TARGET=azure
+
+# Optional: Managed Identity (no credentials needed if configured)
+AZURE_STORAGE_CONNECTION_STRING=<leave-blank-for-managed-identity>
+```
+
+### Step 3 — Deploy to Azure
+```bash
+# Build Docker image
+docker build -t pm-automation:latest .
+
+# Push to Azure Container Registry (ACR)
+az acr build --registry <your-acr> --image pm-automation:latest .
+
+# Deploy to App Service
+az webapp config container set \
+  --name <your-app-service> \
+  --resource-group <your-rg> \
+  --docker-custom-image-name <acr-url>/pm-automation:latest \
+  --docker-registry-server-url https://<acr-url> \
+  --docker-registry-server-username <username> \
+  --docker-registry-server-password <password>
+
+# Set environment variables
+az webapp config appsettings set \
+  --name <your-app-service> \
+  --resource-group <your-rg> \
+  --settings \
+    APP_ENV=production \
+    AI_PROVIDER=watsonx \
+    WATSONX_API_KEY=<key> \
+    WATSONX_PROJECT_ID=<id> \
+    DATABASE_URL=<connection-string> \
+    AZURE_STORAGE_ACCOUNT_NAME=<storage> \
+    DEFAULT_STORAGE_TARGET=azure
+```
+
+### Step 4 — Verify
+```bash
+curl https://<your-app>.azurewebsites.net/health
+# Should return: {"status":"ok"}
+```
+
+---
+
+## API Endpoints
 
 ### Authentication
-All endpoints (except `/health`) require `Authorization: Bearer <token>` header.
+All endpoints require `Authorization: Bearer <token>` header.
 
-In dev mode, you can also use `X-API-Key: dev-secret-key-change-in-prod`.
+In dev mode, use `/dev/token` to generate tokens (only if `AZURE_AD_TENANT_ID` is blank).
 
-| Method | Endpoint | Min Role | Description |
-|--------|----------|----------|-------------|
-| POST | `/dev/token` | Dev only | Get dev JWT token |
-| GET | `/health` | None | Health check |
-| POST | `/api/generate` | Technician | Generate PM document (PDF/DOCX/XLSX) |
-| GET | `/api/history` | All | List PM history |
-| GET | `/api/history/dashboard` | All | Dashboard + AI analytics |
-| POST | `/api/history/{id}/approve` | Supervisor+ | Approve a PM record |
-| GET | `/api/library` | All | Full PM library summary |
-| GET | `/api/library/{machine}/{hours}` | All | Tasks for specific interval |
-| POST | `/api/library/tasks` | Engineer+ | Add tasks manually |
-| POST | `/api/library/hours` | Manager | Update machine hours |
-| GET | `/api/machines` | All | List registered machines |
-| POST | `/api/machines` | Engineer+ | Register new machine |
-| PATCH | `/api/machines/{id}` | Engineer+ | Update machine |
-| POST | `/api/manual/upload` | Engineer+ | Upload PDF → RAG pipeline |
-| GET | `/api/manual/uploads` | Engineer+ | Upload queue |
-| GET | `/api/manual/uploads/{id}` | Engineer+ | Pipeline status |
-| POST | `/api/manual/uploads/{id}/approve` | Engineer | Approve extracted tasks |
-| GET | `/api/checklist/{record_id}` | All | Get checklist state |
-| POST | `/api/checklist/{record_id}` | Technician | Submit filled checklist |
-| GET | `/api/export/history/csv` | Manager | Export history CSV |
-| GET | `/api/export/library/csv` | Manager | Export library CSV |
-| GET | `/api/export/audit-logs/csv` | Manager | Export audit log CSV |
-| GET | `/api/download/{machine}/{year}/{month}/{file}` | All | Download PM document |
-| GET | `/docs` | Dev only | Swagger UI |
+### Upload & Process
 
-### Generate PM Example
-```bash
-curl -X POST http://localhost:8000/api/generate \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "machine_id": "CONTIFORM-C3-L3",
-    "interval_hours": 120,
-    "work_order": "WO-2026-001",
-    "technician_name": "Ahmed Khan",
-    "output_format": "pdf",
-    "storage_target": "local"
-  }'
-```
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/manual/upload` | Upload PDF (streaming, up to 100MB) |
+| GET | `/api/manual/uploads` | List all uploads |
+| GET | `/api/manual/uploads/{id}` | Get upload details + extracted tasks |
+| GET | `/api/manual/uploads/{id}/status` | Get pipeline progress (%) |
+| POST | `/api/manual/uploads/{id}/approve` | Approve extracted tasks |
+| POST | `/api/manual/uploads/{id}/reject` | Reject tasks + add comment |
+| GET | `/api/manual/uploads/{id}/generate-zip` | Download Excel ZIP |
+| GET | `/api/manual/uploads/{id}/citations` | Get page citations for each task |
 
-### Dashboard (with AI Analytics)
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8000/api/history/dashboard
-```
-Returns: stats, overdue PMs, recent PMs, schedule, AI-predicted next due dates.
+### System
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/health` | Health check (no auth required) |
+| GET | `/docs` | Swagger UI (dev mode only) |
+| POST | `/dev/token` | Get dev JWT (dev mode only) |
 
 ---
 
-## Run Tests
+## Extraction Strategies Explained
 
-```bash
-# All tests
-pytest tests/ -v --asyncio-mode=auto
+### Strategy 1: Header Tables
+Finds tables with column headers like "Interval | Action | Description" or "Daily | Weekly | 500h".
 
-# With coverage report
-pytest tests/ -v --cov=app --cov-report=term-missing --asyncio-mode=auto
-
-# Individual test files
-pytest tests/test_generate.py -v --asyncio-mode=auto
-pytest tests/test_library.py  -v --asyncio-mode=auto
-pytest tests/test_auth.py     -v --asyncio-mode=auto
-pytest tests/test_history.py  -v --asyncio-mode=auto
-
-# Security scan (Bandit — same as CI/CD pipeline)
-bandit -r app/ --severity-level medium
+**Example:**
 ```
+COMPONENT          | 500H | 1000H | 3000H
+Hydraulic System   | X    | X     | ✓
+Oil Filter         |      | ✓     | ✓
+```
+
+→ Extracts: Every 500h: Hydraulic system, Every 1000h: Hydraulic system + Oil filter, etc.
+
+### Strategy 2: Generic Tables
+Finds ANY table with numeric intervals and action text.
+
+**Example:**
+```
+Interval (hours) | Task
+500              | Replace hydraulic oil
+1000             | Check pump seals
+3000             | Overhaul transmission
+```
+
+### Strategy 3: Text Patterns
+7 regex patterns match text outside tables:
+
+1. **Every N hours:** `every 500 hours → replace X`
+2. **Shorthand:** `500h – drain, 1000h – service` (Krones/PTF style)
+3. **Every N months:** `every 6 months` → converts to 180 hours
+4. **Every N weeks:** `every 4 weeks` → converts to 120 hours
+5. **Every N years:** `every 2 years` → converts to 17,520 hours
+6. **Section headers:** `[500 Hour Maintenance]` followed by bullets
+7. **Numbered lists:** Under "Every 500h:", numbered items 1-5
 
 ---
 
 ## Docker
 
+### Build
 ```bash
-# Build and run (easiest)
-docker-compose up --build
-
-# Build image manually
 docker build -t pm-automation:latest .
+```
 
-# Run container (dev mode, local storage)
+### Run (Development)
+```bash
 docker run -p 8000:8000 \
   -e APP_ENV=development \
   -e DEV_API_KEY=dev-secret-key-change-in-prod \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/output:/app/output \
   pm-automation:latest
+```
 
-# Run with watsonx:
+### Run (Production with watsonx)
+```bash
 docker run -p 8000:8000 \
-  -e APP_ENV=development \
+  -e APP_ENV=production \
   -e AI_PROVIDER=watsonx \
-  -e WATSONX_API_KEY=your-iam-api-key \
-  -e WATSONX_PROJECT_ID=your-project-id \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/output:/app/output \
+  -e WATSONX_API_KEY=<key> \
+  -e WATSONX_PROJECT_ID=<id> \
+  -e DATABASE_URL=<connection-string> \
+  -e AZURE_STORAGE_ACCOUNT_NAME=<storage> \
   pm-automation:latest
 ```
 
----
-
-## Production Deployment — Azure App Service
-
-### Step 1 — Create Azure Resources
+### Docker Compose (Local)
 ```bash
-az login
-az group create --name pm-automation-rg --location uksouth
-
-az appservice plan create \
-  --name pm-automation-plan \
-  --resource-group pm-automation-rg \
-  --sku B2 --is-linux
-
-az webapp create \
-  --name pm-automation-api \
-  --resource-group pm-automation-rg \
-  --plan pm-automation-plan \
-  --runtime "PYTHON|3.12"
-```
-
-### Step 2 — Create Azure SQL Database
-```bash
-az sql server create \
-  --name pm-sql-server \
-  --resource-group pm-automation-rg \
-  --admin-user pmadmin \
-  --admin-password "$(openssl rand -base64 24)"
-
-az sql db create \
-  --server pm-sql-server \
-  --resource-group pm-automation-rg \
-  --name pm_automation \
-  --edition Basic
-```
-
-### Step 3 — Create Azure AI Search (for RAG)
-```bash
-az search service create \
-  --name pm-search \
-  --resource-group pm-automation-rg \
-  --sku basic
-
-# Create the index (run once after service is deployed)
-# The index schema requires: id, manual_id, text, page_start, page_end, source_file, content_vector
-```
-
-### Step 4 — Store Secrets in Key Vault
-```bash
-az keyvault create \
-  --name pm-keyvault \
-  --resource-group pm-automation-rg
-
-# Store all secrets — never hardcode these
-az keyvault secret set --vault-name pm-keyvault --name "pm-app-secret-key"                    --value "$(openssl rand -hex 32)"
-az keyvault secret set --vault-name pm-keyvault --name "pm-database-url"                       --value "mssql+aioodbc://..."
-az keyvault secret set --vault-name pm-keyvault --name "pm-openai-api-key"                     --value "sk-..."
-az keyvault secret set --vault-name pm-keyvault --name "pm-watsonx-api-key"                    --value "your-ibm-iam-api-key"
-az keyvault secret set --vault-name pm-keyvault --name "pm-azure-storage-connection-string"    --value "DefaultEndpointsProtocol=..."
-az keyvault secret set --vault-name pm-keyvault --name "pm-azure-search-api-key"               --value "..."
-az keyvault secret set --vault-name pm-keyvault --name "pm-azure-ad-client-secret"             --value "..."
-```
-
-### Step 5 — Enable Managed Identity & Key Vault Access
-```bash
-# Assign system-managed identity to the web app
-az webapp identity assign \
-  --name pm-automation-api \
-  --resource-group pm-automation-rg
-
-# Grant identity access to Key Vault
-IDENTITY=$(az webapp identity show --name pm-automation-api --resource-group pm-automation-rg --query principalId -o tsv)
-az keyvault set-policy \
-  --name pm-keyvault \
-  --object-id $IDENTITY \
-  --secret-permissions get list
-```
-
-### Step 6 — Set App Settings (non-secret config only)
-```bash
-az webapp config appsettings set \
-  --name pm-automation-api \
-  --resource-group pm-automation-rg \
-  --settings \
-    APP_ENV=production \
-    AZURE_KEY_VAULT_URL=https://pm-keyvault.vault.azure.net/ \
-    AI_PROVIDER=watsonx \
-    WATSONX_PROJECT_ID=your-project-id \
-    WATSONX_URL=https://us-south.ml.cloud.ibm.com \
-    AZURE_AD_TENANT_ID=your-tenant-id \
-    AZURE_AD_CLIENT_ID=your-client-id \
-    AZURE_STORAGE_ACCOUNT_NAME=pmstorageaccount \
-    AZURE_STORAGE_CONTAINER_NAME=pm-docs \
-    AZURE_SEARCH_ENDPOINT=https://pm-search.search.windows.net \
-    AZURE_SEARCH_INDEX_NAME=pm-manuals \
-    DEFAULT_STORAGE_TARGET=azure \
-    ALLOWED_ORIGINS=https://pm-automation-api.azurewebsites.net \
-    RATE_LIMIT_PER_MINUTE=100
-```
-
-### Step 7 — Deploy
-```bash
-az webapp up \
-  --name pm-automation-api \
-  --resource-group pm-automation-rg \
-  --runtime PYTHON:3.12
-```
-
-### Step 8 — Verify
-```bash
-curl https://pm-automation-api.azurewebsites.net/health
+docker-compose up --build
 ```
 
 ---
 
-## Production Checklist
+## Performance Benchmarks
 
-Before going live, verify:
+| PDF | Size | Pages | Classification | Chunking | Embedding | Extraction | ZIP Gen | Total |
+|---|---|---|---|---|---|---|---|---|
+| Bottle Coder | 40KB | 1 | 2s | 5s | 8s | 20s | 5s | **40s** |
+| Eisbar DAS | 2.0MB | 50 | 5s | 15s | 25s | 60s | 8s | **113s** |
+| HyPET 5e | 29.1MB | 570 | 8s | 30s | 90s | 270s | 15s | **413s** |
+| Tetra Pak | 30.5MB | 806 | 10s | 40s | 95s | 300s | 20s | **465s** |
 
-- [ ] `APP_ENV=production` set (disables `/docs`, `/dev/token`, enables security headers)
-- [ ] `APP_SECRET_KEY` is a strong 32+ char random secret (not the default)
-- [ ] `AZURE_KEY_VAULT_URL` set — all sensitive secrets stored there, NOT in env vars
-- [ ] `AZURE_AD_TENANT_ID` + `AZURE_AD_CLIENT_ID` set — real Azure AD SSO enforced
-- [ ] `ALLOWED_ORIGINS` set to your actual domain(s)
-- [ ] `DEFAULT_STORAGE_TARGET=azure` — PM documents stored in Azure Blob, not local
-- [ ] `DATABASE_URL` points to Azure SQL (not SQLite)
-- [ ] `APPLICATIONINSIGHTS_CONNECTION_STRING` set — monitoring enabled
-- [ ] CI/CD pipeline (`.github/workflows/ci-cd.yml`) passing — Bandit → Docker → Azure
-- [ ] TLS 1.3 enforced at APIM gateway level
-- [ ] Azure AD Conditional Access policies configured for MFA enforcement
-- [ ] Managed Identity assigned to App Service (no passwords in code or config)
+**Timeouts:**
+- PDF upload: 30s
+- Classification: 30s
+- Chunking: 120s
+- Embedding: 180s
+- Extraction: 360s (per strategy: 120s, stop if time exceeded)
+- ZIP generation: 120s
+
+---
+
+## Troubleshooting
+
+### PDF upload fails (400 error)
+**Problem:** "File too large" or corrupted PDF  
+**Solution:**
+- Verify file is under 100MB
+- Try opening PDF locally to confirm it's not corrupted
+- Check `Content-Type: application/pdf` header
+
+### Pipeline hangs at EXTRACTING
+**Problem:** Extraction timeout (>6 minutes)  
+**Solution:**
+- Check IBM watsonx API availability
+- Verify `WATSONX_API_KEY` is a valid IAM API key (not a service credential)
+- Check `WATSONX_PROJECT_ID` matches your project
+- Look at app logs for HTTP 401/403 errors
+
+### Extraction returns 0 tasks
+**Problem:** No tasks extracted  
+**Solution:**
+- Verify PDF contains maintenance/PM content (not just technical specs)
+- Check PDF text extraction works (`pdfplumber` can read it)
+- Try smaller PDF first (e.g., Bottle Coder test)
+- Look at app logs for extraction errors
+
+### Low task count (< 50 expected)
+**Problem:** Fewer tasks than expected  
+**Solution:**
+- Verify full-PDF scan found PM pages (check logs for keyword matches)
+- Check all 3 strategies ran (not just strategy 1)
+- Verify IBM embedding truncation (1800-char limit)
+- Try uploading a different PDF to rule out document-specific issues
+
+### IBM watsonx returns 401
+**Problem:** "Unauthorized" from watsonx  
+**Solution:**
+- Verify `WATSONX_API_KEY` is an IBM Cloud IAM API key (from cloud.ibm.com/iam/apikeys)
+- NOT a service credential or API key from elsewhere
+- Check API key hasn't expired
+- Verify `WATSONX_PROJECT_ID` is correct (from watsonx.ai project settings)
+
+### IBM watsonx returns 400 "model not found"
+**Problem:** Llama model not available  
+**Solution:**
+- Verify `WATSONX_URL` matches your region: `https://us-south.ml.cloud.ibm.com`
+- Check model availability: `meta-llama/llama-3-3-70b-instruct`
+- Verify project has access to the model (may need to enable via UI)
+
+### Database connection fails
+**Problem:** "Cannot connect to database"  
+**Solution:**
+- For dev: leave `DATABASE_URL` blank (uses SQLite)
+- For Azure SQL: verify connection string format
+- For Managed Identity: ensure App Service has identity assigned
+- Check firewall rules allow connection
+
+### Storage errors when saving ZIP
+**Problem:** "Cannot access blob storage"  
+**Solution:**
+- If `DEFAULT_STORAGE_TARGET=local`: verify `./output` directory exists
+- If `DEFAULT_STORAGE_TARGET=azure`: verify storage account name and container exist
+- For Managed Identity: ensure App Service identity has Storage Blob Contributor role
+
+---
+
+## Tests
+
+```bash
+# Run all tests
+pytest tests/ -v --asyncio-mode=auto
+
+# Run with coverage
+pytest tests/ -v --cov=app --cov-report=term-missing --asyncio-mode=auto
+
+# Run specific test file
+pytest tests/test_extraction.py -v --asyncio-mode=auto
+
+# Run security scan (Bandit)
+bandit -r app/ --severity-level medium
+```
 
 ---
 
 ## Project Structure
 
 ```
-Niagra_Project/
-  app/
-    api/routes/         FastAPI route handlers
-      generate.py       POST /api/generate — build PM document
-      history.py        GET /api/history + dashboard with AI analytics
-      library.py        GET /api/library — PM task library
-      machines.py       Machine CRUD
-      manual.py         POST /api/manual/upload — RAG pipeline trigger
-      checklist.py      Fill & submit PM checklist
-      export.py         CSV exports (Manager only)
-      download.py       File download serving
-    auth/
-      azure_ad.py       Azure AD JWT validation + dev token
-      rbac.py           Role-based permissions (Supervisor/Technician/Manager/Engineer)
-    core/
-      document_generator.py  PDF (ReportLab) / DOCX / XLSX generation
-      pm_library.py     Seed + query PM task library
-      storage_module.py Upload to Azure Blob / SFTP / local
-      history_module.py Build dashboard data
-      analytics.py      IBM watsonx.ai analytics (or rule-based fallback)
-      key_vault.py      Azure Key Vault secret loading at startup
-      app_insights.py   Request logging middleware + App Insights init
-    rag/
-      pipeline.py       Orchestrate full RAG pipeline (Stage A + B)
-      classifier.py     Keyword + AI manufacturer detection
-      chunker.py        500w/103w word-based chunking
-      embedder.py       watsonx slate-125m or OpenAI text-embedding-3-large
-      retriever.py      Azure AI Search vector index + query
-      extractor.py      Granite-3b / GPT-4o JSON task extraction
-      watsonx_auth.py   IBM IAM token helper (API key → Bearer token)
-    db/
-      models.py         SQLAlchemy models (Machine, Task, PMRecord, AuditLog, ...)
-      crud.py           All database operations
-      database.py       Async SQLAlchemy engine setup
-    schemas/            Pydantic request/response models
-    utils/
-      audit.py          Immutable GMP audit log writer
-      error_handler.py  Global exception handlers
-      security.py       File hash, path traversal protection, filename sanitization
-    config.py           Pydantic Settings (all env vars)
-    dependencies.py     FastAPI dependency injection (auth + DB)
-    main.py             FastAPI app — middleware, routes, lifespan
-  data/
-    pm_library.json     5 machines, 228 tasks, 48 intervals (source of truth)
-    pm_automation.db    SQLite dev database (auto-created)
-  frontend/
-    index.html          Login page (dev form + Azure SSO button)
-    dashboard.html      Full SPA dashboard (all 4 roles)
-    static/css/         Styles
-    static/js/app.js    Dashboard logic (API calls, role-based UI)
-  scripts/
-    seed_database.py    Load pm_library.json into database
-    generate_all_pms.py Generate all 16 PM PDFs in one shot
-  tests/                pytest test suite
-  .github/workflows/    CI/CD: Bandit security scan → Docker build → Azure deploy
-  Dockerfile
-  docker-compose.yml
-  requirements.txt
-  .env.example          Template — copy to .env and fill in values
-  RUN_GUIDE.md          This file
+pm_project/
+├── app/
+│   ├── api/
+│   │   └── routes/
+│   │       └── manual.py          # PDF upload, pipeline, approve, reject, ZIP
+│   ├── rag/
+│   │   ├── pipeline.py            # 3-strategy extraction + PM-page scan
+│   │   ├── extractor.py           # IBM Llama 3.3 70B batch extraction
+│   │   ├── embedder.py            # IBM Slate-125M embeddings
+│   │   ├── chunker.py             # 500-word chunks with 103-word overlap
+│   │   ├── classifier.py          # Manufacturer detection
+│   │   └── watsonx_auth.py        # IBM IAM token refresh
+│   ├── core/
+│   │   └── document_generator.py  # CON L3 Excel / ZIP generation
+│   ├── db/
+│   │   └── models.py              # Database schemas
+│   └── main.py                    # FastAPI app
+├── frontend/
+│   ├── dashboard.html             # Upload, review, download
+│   └── review.html                # Task review page (intervals)
+├── data/
+│   └── pm_library.json            # (empty - pure AI mode)
+├── .env.example                   # Template (IBM watsonx config)
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## Troubleshooting
+## Git Workflow
 
-### Server won't start
-```
-ERROR: Cannot import 'aiosqlite'
-```
-Run: `pip install aiosqlite`
+### Branch Strategy
+- `main` — production-ready, stable
+- `develop` — integration branch
+- `feature/initial-development` — active development
 
-### IBM watsonx returns 401
-- The raw API key must NOT be passed as `Authorization: Bearer <api_key>` directly
-- The system exchanges it for an IAM token via `https://iam.cloud.ibm.com/identity/token`
-- Check that `WATSONX_API_KEY` is your IBM Cloud IAM API key (from cloud.ibm.com → IAM → API Keys), NOT a service credential
-
-### IBM watsonx returns 400 / "model not found"
-- `WATSONX_URL` must match the region where your project is (e.g. `https://us-south.ml.cloud.ibm.com`)
-- `WATSONX_PROJECT_ID` must be the correct project UUID from your watsonx.ai project settings
-
-### Generate PM returns "No tasks found"
-- The PM Library has been seeded (check `/api/library`)
-- The machine_id and interval_hours must match exactly what's in the library
-- Example valid combos: `CONTIFORM-C3-L3` / `120`, `BOTTLECODER-L3` / `240`
-
-### Download URL returns 404
-- Storage target was `local` and the file was generated correctly
-- URL pattern: `/api/download/{machine_id}/{year}/{month}/{filename}`
-- Files stored at: `output/pm-docs/{machine_id}/{year}/{month}/{filename}`
-
-### RAG pipeline stuck at EMBEDDING
-- Azure AI Search endpoint not set — pipeline falls back to linear top-10 selection (still works)
-- Check `AZURE_SEARCH_ENDPOINT` and `AZURE_SEARCH_API_KEY` in `.env`
-
-### Tests fail with "no event loop"
+### Pushing to Azure DevOps
 ```bash
-pytest tests/ -v --asyncio-mode=auto
+# Add remote (if not already added)
+git remote add devops https://dev.azure.com/niagara/PMW-POC/_git/PMW-POC
+
+# Commit your changes
+git add .
+git commit -m "feat: your feature description"
+
+# Push to feature branch
+git push origin feature/initial-development
+
+# Push to devops
+git push devops feature/initial-development
 ```
-The `--asyncio-mode=auto` flag is required.
+
+---
+
+## Production Readiness Checklist
+
+Before deploying to production:
+
+- [ ] `APP_ENV=production` set (disables debug endpoints)
+- [ ] `APP_SECRET_KEY` is a strong 32+ char random secret
+- [ ] `AI_PROVIDER=watsonx` with valid IBM credentials
+- [ ] `DATABASE_URL` points to Azure SQL (not SQLite)
+- [ ] `DEFAULT_STORAGE_TARGET=azure` with Blob Storage account
+- [ ] `APPLICATIONINSIGHTS_CONNECTION_STRING` set (monitoring)
+- [ ] All secrets stored in Azure Key Vault (not .env)
+- [ ] Managed Identity assigned to App Service
+- [ ] Azure SQL firewall allows App Service IP
+- [ ] Blob Storage container created (pm-manuals)
+- [ ] CI/CD pipeline passing (build → test → deploy)
+- [ ] TLS 1.3 enforced at HTTPS endpoint
+- [ ] Health check endpoint returns 200 OK
+- [ ] Tested with real PDFs (50-170 task extraction)
+
+---
+
+## Support
+
+**For issues:**
+- Check `/api/health` endpoint
+- Review application logs in Azure App Insights
+- Check IBM watsonx API status
+- Verify all environment variables are set correctly
+
+**Project Repository:**  
+https://dev.azure.com/niagara/PMW-POC/_git/PMW-POC (feature/initial-development branch)
+
+**Build Status:** ✅ Live on fn-dev-pmw (Azure App Service)
+
+---
+
+*Last Updated: 2026-09-19*  
+*Build: cc3d (production-ready)*

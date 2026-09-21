@@ -90,6 +90,7 @@ async def upload_manual(
     tmp_path.write_bytes(content)
 
     # Archive PDF permanently to Azure Blob Storage (keyed by manual_id prefix)
+    # Run in background thread to avoid blocking the event loop on large file uploads
     blob_url: Optional[str] = None
     try:
         from app.config import get_settings as _gs
@@ -109,8 +110,13 @@ async def upload_manual(
             # manual_id not yet known — use placeholder, updated after DB insert
             _blob_name_tmp = f"manuals/pending/{safe_name}"
             _cc = _bsc.get_container_client(_s.azure_storage_container_name)
-            with open(tmp_path, "rb") as _f:
-                _cc.upload_blob(name=_blob_name_tmp, data=_f, overwrite=True)
+
+            # Upload in background thread to avoid blocking event loop (30MB+ files take 1-2 min)
+            def _upload_blob():
+                with open(tmp_path, "rb") as _f:
+                    _cc.upload_blob(name=_blob_name_tmp, data=_f, overwrite=True)
+
+            await asyncio.to_thread(_upload_blob)
             blob_url = f"https://{_s.azure_storage_account_name or _bsc.account_name}.blob.core.windows.net/{_s.azure_storage_container_name}/{_blob_name_tmp}"
     except Exception as _be:
         import logging as _log
@@ -131,11 +137,16 @@ async def upload_manual(
     )
 
     # Re-key the blob under the real manual_id now that we have it
+    # Move in background thread (copy + delete can take 10-30s on large files)
     if blob_url and upload_record.manual_id:
         try:
             _final_blob = f"manuals/{upload_record.manual_id}/{safe_name}"
-            _cc.copy_blob(_cc.get_blob_client(_final_blob), blob_url)
-            _cc.delete_blob(f"manuals/pending/{safe_name}")
+
+            def _rekey_blob():
+                _cc.copy_blob(_cc.get_blob_client(_final_blob), blob_url)
+                _cc.delete_blob(f"manuals/pending/{safe_name}")
+
+            await asyncio.to_thread(_rekey_blob)
             blob_url = blob_url.replace(f"manuals/pending/{safe_name}", _final_blob)
             await crud.update_manual_upload(db, upload_record.manual_id, {"blob_url": blob_url})
         except Exception:

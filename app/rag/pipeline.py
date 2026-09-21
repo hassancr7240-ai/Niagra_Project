@@ -834,39 +834,57 @@ def _extract_tasks_from_pdf_tables(pdf_path: Path) -> list[dict]:
       3. Text-pattern fallback — regex over page text for "Xh / every X hours"
          maintenance bullets (handles German/English narrative manuals)
 
-    Hard timeout: 120s per strategy to prevent pdfplumber hangs on malformed PDFs.
+    Hard timeout: 60s per strategy to prevent pdfplumber hangs on malformed PDFs.
+    Total: 180s max (3 min) for all strategies combined.
     """
     import pdfplumber
     import time
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     # Run ALL three strategies and merge — do NOT stop at first success.
     all_raw: list[dict] = []
-    deadline = time.monotonic() + 360  # 6 min hard cap for entire extraction
+    deadline = time.monotonic() + 180  # 3 min hard cap for entire extraction (was 6 min)
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
             t1 = []
             t2 = []
             t3 = []
 
-            # Each strategy gets max 120s
+            # Each strategy gets max 60s (reduced from 120s to prevent long hangs)
             if time.monotonic() < deadline:
                 try:
-                    t1_deadline = time.monotonic() + 120
-                    t1 = _try_header_table(pdf, pdf_path)
+                    _remaining = deadline - time.monotonic()
+                    if _remaining > 0:
+                        logger.info("Strategy 1 (header tables): %0.1fs remaining", _remaining)
+                        t1 = _try_header_table(pdf, pdf_path)
+                    else:
+                        logger.info("Strategy 1 skipped (timeout)")
                 except Exception as e:
                     logger.warning("Header table extraction failed: %s", e)
                     t1 = []
 
             if time.monotonic() < deadline:
                 try:
-                    t2 = _try_generic_table(pdf, pdf_path)
+                    _remaining = deadline - time.monotonic()
+                    if _remaining > 0:
+                        logger.info("Strategy 2 (generic tables): %0.1fs remaining", _remaining)
+                        t2 = _try_generic_table(pdf, pdf_path)
+                    else:
+                        logger.info("Strategy 2 skipped (timeout)")
                 except Exception as e:
                     logger.warning("Generic table extraction failed: %s", e)
                     t2 = []
 
             if time.monotonic() < deadline:
                 try:
-                    t3 = _try_text_patterns(pdf, pdf_path)
+                    _remaining = deadline - time.monotonic()
+                    if _remaining > 0:
+                        logger.info("Strategy 3 (text patterns): %0.1fs remaining", _remaining)
+                        t3 = _try_text_patterns(pdf, pdf_path)
+                    else:
+                        logger.info("Strategy 3 skipped (timeout)")
                 except Exception as e:
                     logger.warning("Text pattern extraction failed: %s", e)
                     t3 = []

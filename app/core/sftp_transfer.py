@@ -110,11 +110,10 @@ async def upload_extracted_tasks(
     Returns:
         True if upload successful, False otherwise.
     """
-    if not config.ftp_host or not config.ftp_username:
-        logger.info("SFTP not configured (ftp_host or ftp_username missing), skipping upload")
-        return True  # Not an error, just not configured
+    if not config.pmw_file_transfer_host or not config.pmw_file_transfer_username:
+        logger.info("SFTP not configured, skipping upload")
+        return True
 
-    # Generate remote filename: MANUAL_ID_TASKS_YYYYMMDD.zip
     from datetime import datetime
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     remote_filename = f"{manual_id}_TASKS_{timestamp}.zip"
@@ -122,10 +121,9 @@ async def upload_extracted_tasks(
     return await upload_file_to_sftp(
         local_file_path=zip_file_path,
         remote_filename=remote_filename,
-        host=config.ftp_host,
-        port=config.ftp_port,
-        username=config.ftp_username,
-        password=config.ftp_password,
-        private_key_path=config.ftp_key_path,
-        remote_dir=config.ftp_remote_base_path,
+        host=config.pmw_file_transfer_host,
+        port=int(config.pmw_file_transfer_port),
+        username=config.pmw_file_transfer_username,
+        password=config.pmw_file_transfer_password,
+        remote_dir=config.pmw_file_transfer_incoming_dir,
     )

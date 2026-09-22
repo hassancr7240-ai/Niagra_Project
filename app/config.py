@@ -46,21 +46,19 @@ class Settings(BaseSettings):
 
     # ── FTP / SFTP (File Transfer) ────────────────────────────────────────────
     # Upload extracted Excel/CSV files to on-premises ERP system
-    # Credentials: username + password (or SSH key)
-    # Password stored in Azure Key Vault (ADR-PMW-FTP-PWD)
-    ftp_host: Optional[str] = None              # 10.30.225.118
-    ftp_port: int = 22                          # 220 for custom SFTP
-    ftp_username: Optional[str] = None          # pmwftp
-    ftp_password: Optional[str] = None          # from Key Vault: ADR-PMW-FTP-PWD
-    ftp_key_path: Optional[str] = None          # alternative: SSH private key path
-    ftp_remote_base_path: str = "/pm-docs"      # root directory on SFTP server
+    # Config from Azure App Service settings
+    pmw_file_transfer_host: Optional[str] = None              # 10.30.225.118
+    pmw_file_transfer_port: int = 22                          # 220
+    pmw_file_transfer_username: Optional[str] = None          # pmwftp
+    pmw_file_transfer_password: Optional[str] = None          # from Key Vault: ADR-PMW-FTP-PWD
+    pmw_file_transfer_incoming_dir: str = "/"                 # /
+    pmw_file_transfer_pool_size: int = 1                      # 1 connection
 
     # ── ERP REST API Integration ────────────────────────────────────────────────
     # Call ERP API to create work definitions after PM extraction
-    # API key stored in Azure Key Vault
-    erp_api_url: Optional[str] = None           # https://apim-dev-intg.azure-api.net/api/dev/sp/v1/pmw/process-work-definition
-    erp_api_key: Optional[str] = None           # from Key Vault: ADR-PMW-ERP-API-KEY
-    erp_org_code: str = "A32"                   # default org code
+    erp_api_url: str = "https://apim-dev-intg.azure-api.net/api/dev/sp/v1/pmw/process-work-definition"
+    erp_api_key: Optional[str] = None           # 24318647205f417492d88f3740d3b17d
+    erp_org_code: str = "All"                   # default org code
 
     # ── IBM watsonx.ai ────────────────────────────────────────────────────────
     # AI provider — IBM watsonx.ai cloud (us-south).

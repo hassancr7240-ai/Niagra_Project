@@ -44,12 +44,16 @@ class Settings(BaseSettings):
     # ── Azure Key Vault ───────────────────────────────────────────────────────
     azure_key_vault_url: Optional[str] = None
 
-    # ── FTP / SFTP ────────────────────────────────────────────────────────────
-    ftp_host: Optional[str] = None
-    ftp_port: int = 22
-    ftp_username: Optional[str] = None
-    ftp_key_path: Optional[str] = None
-    ftp_remote_base_path: str = "/pm-docs"
+    # ── FTP / SFTP (File Transfer) ────────────────────────────────────────────
+    # Upload extracted Excel/CSV files to on-premises ERP system
+    # Credentials: username + password (or SSH key)
+    # Password stored in Azure Key Vault (ADR-PMW-FTP-PWD)
+    ftp_host: Optional[str] = None              # 10.30.225.118
+    ftp_port: int = 22                          # 220 for custom SFTP
+    ftp_username: Optional[str] = None          # pmwftp
+    ftp_password: Optional[str] = None          # from Key Vault: ADR-PMW-FTP-PWD
+    ftp_key_path: Optional[str] = None          # alternative: SSH private key path
+    ftp_remote_base_path: str = "/pm-docs"      # root directory on SFTP server
 
     # ── IBM watsonx.ai ────────────────────────────────────────────────────────
     # AI provider — IBM watsonx.ai cloud (us-south).

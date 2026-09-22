@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     ftp_key_path: Optional[str] = None          # alternative: SSH private key path
     ftp_remote_base_path: str = "/pm-docs"      # root directory on SFTP server
 
+    # ── ERP REST API Integration ────────────────────────────────────────────────
+    # Call ERP API to create work definitions after PM extraction
+    # API key stored in Azure Key Vault
+    erp_api_url: Optional[str] = None           # https://apim-dev-intg.azure-api.net/api/dev/sp/v1/pmw/process-work-definition
+    erp_api_key: Optional[str] = None           # from Key Vault: ADR-PMW-ERP-API-KEY
+    erp_org_code: str = "A32"                   # default org code
+
     # ── IBM watsonx.ai ────────────────────────────────────────────────────────
     # AI provider — IBM watsonx.ai cloud (us-south).
     # Task extraction  : meta/llama-3-3-70b-instruct  (set via WATSONX_MODEL_GENERATION)

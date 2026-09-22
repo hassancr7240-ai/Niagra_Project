@@ -641,7 +641,7 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
             log.warning("raw_update failed (%s): %s", status, e)
 
     async def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "") -> None:
-        """Write final pipeline results via async ORM session."""
+        """Write final pipeline results via async ORM session, then trigger SFTP + ERP integration."""
         try:
             async with _AsyncSessionLocal() as _session:
                 await _session.execute(
@@ -664,6 +664,53 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
                     },
                 )
                 await _session.commit()
+
+            # After extraction complete: upload to SFTP + call ERP API
+            log.info("[%s] Extraction complete, triggering SFTP + ERP integration", manual_id)
+
+            from app.core.sftp_transfer import upload_extracted_tasks
+            from app.core.erp_integration import send_to_erp
+            from app.core.document_generator import generate_con_l3_zip_bytes
+
+            # Generate Excel ZIP for SFTP upload
+            try:
+                import json as _json
+                tasks = _json.loads(extracted_tasks_json) if extracted_tasks_json else []
+                zip_bytes = await generate_con_l3_zip_bytes(
+                    manual_id=manual_id,
+                    machine_id=inferred_machine_id or "UNKNOWN",
+                    manufacturer=manufacturer,
+                    tasks=tasks,
+                )
+
+                # Save ZIP to temp file for SFTP upload
+                import tempfile as _tempfile
+                from pathlib import Path as _Path
+                with _tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as _tmp:
+                    _tmp.write(zip_bytes)
+                    _zip_path = _Path(_tmp.name)
+
+                # Upload to SFTP
+                sftp_ok = await upload_extracted_tasks(manual_id, _zip_path, _settings)
+                log.info("[%s] SFTP upload: %s", manual_id, "SUCCESS" if sftp_ok else "FAILED")
+
+                # Call ERP API
+                erp_ok = await send_to_erp(
+                    manual_id=manual_id,
+                    manufacturer=manufacturer,
+                    machine_id=inferred_machine_id or "UNKNOWN",
+                    email_id="system@niagara.local",  # TODO: get from user context
+                    config=_settings,
+                )
+                log.info("[%s] ERP API call: %s", manual_id, "SUCCESS" if erp_ok else "FAILED")
+
+                # Clean up temp file
+                _zip_path.unlink(missing_ok=True)
+
+            except Exception as _e:
+                log.warning("[%s] SFTP/ERP integration failed (non-blocking): %s", manual_id, _e)
+                # Don't fail the pipeline, just log the warning
+
         except Exception as e:
             log.warning("raw_finalize failed: %s", e)
 

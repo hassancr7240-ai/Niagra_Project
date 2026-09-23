@@ -8,7 +8,8 @@ on:
 
 env:
   PYTHON_VERSION: "3.12"
-  AZURE_WEBAPP_NAME: pm-automation-api
+  AZURE_WEBAPP_NAME: fn-dev-pmw
+  AZURE_RESOURCE_GROUP: rg-dev-IntegrationTeamAI
 
 jobs:
   # ── Security Scan (Bandit) ──────────────────────────────────────────────────

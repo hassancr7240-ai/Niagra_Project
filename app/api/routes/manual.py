@@ -642,9 +642,15 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
 
     async def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "", settings=None) -> None:
         """Write final pipeline results via async ORM session, then trigger SFTP + ERP integration."""
+        import logging as _log_debug
+        _log_debug.getLogger(__name__).info("[FINALIZE-START] _raw_finalize called with manual_id=%s", manual_id)
+
         if settings is None:
             from app.config import get_settings
             settings = get_settings()
+            _log_debug.getLogger(__name__).info("[FINALIZE-CONFIG] settings loaded from get_settings()")
+
+        _log_debug.getLogger(__name__).info("[FINALIZE-DB] about to update manual_uploads in DB")
         try:
             async with _AsyncSessionLocal() as _session:
                 await _session.execute(
@@ -669,11 +675,13 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
                 await _session.commit()
 
             # After extraction complete: upload to SFTP + call ERP API
+            _log_debug.getLogger(__name__).info("[FINALIZE-SFTP] About to trigger SFTP + ERP for manual_id=%s", manual_id)
             log.info("[%s] Extraction complete, triggering SFTP + ERP integration", manual_id)
 
             from app.core.sftp_transfer import upload_extracted_tasks
             from app.core.erp_integration import send_to_erp
             from app.core.document_generator import generate_con_l3_zip_bytes
+            _log_debug.getLogger(__name__).info("[FINALIZE-IMPORTS] SFTP/ERP modules imported")
 
             # Generate Excel ZIP for SFTP upload
             try:

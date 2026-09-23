@@ -640,8 +640,11 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
         except Exception as e:
             log.warning("raw_update failed (%s): %s", status, e)
 
-    async def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "") -> None:
+    async def _raw_finalize(extracted_tasks_json: str, manufacturer: str, chapters_json: str, inferred_machine_id: str = "", settings=None) -> None:
         """Write final pipeline results via async ORM session, then trigger SFTP + ERP integration."""
+        if settings is None:
+            from app.config import get_settings
+            settings = get_settings()
         try:
             async with _AsyncSessionLocal() as _session:
                 await _session.execute(
@@ -691,7 +694,7 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
                     _zip_path = _Path(_tmp.name)
 
                 # Upload to SFTP
-                sftp_ok = await upload_extracted_tasks(manual_id, _zip_path, _settings)
+                sftp_ok = await upload_extracted_tasks(manual_id, _zip_path, settings)
                 log.info("[%s] SFTP upload: %s", manual_id, "SUCCESS" if sftp_ok else "FAILED")
 
                 # Call ERP API
@@ -700,7 +703,7 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
                     manufacturer=manufacturer,
                     machine_id=inferred_machine_id or "UNKNOWN",
                     email_id="system@niagara.local",  # TODO: get from user context
-                    config=_settings,
+                    config=settings,
                 )
                 log.info("[%s] ERP API call: %s", manual_id, "SUCCESS" if erp_ok else "FAILED")
 

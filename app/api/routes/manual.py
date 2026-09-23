@@ -1224,9 +1224,11 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
 
     log.info("[%s] Extracted %d tasks — writing to DB", manual_id, len(extracted_tasks))
 
+    log.critical("[CALLBACK-ABOUT-TO-CALL] Calling finalize_fn now for %s", manual_id)
     await finalize_fn(
         json.dumps(extracted_tasks),
         classification.manufacturer,
         json.dumps(classification.detected_chapters),
         inferred_machine_id,
     )
+    log.critical("[CALLBACK-RETURNED] finalize_fn completed for %s", manual_id)

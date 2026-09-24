@@ -113,34 +113,38 @@ async def _upload_ftp(
     local_file: Path, machine_id: str, file_name: str
 ) -> tuple[str, str]:
     try:
-        import paramiko
+        from ftplib import FTP, all_errors
+        import asyncio
 
         now = datetime.utcnow()
         remote_dir = f"{settings.ftp_remote_base_path}/{machine_id}/{now.year}/{now.month:02d}"
         remote_path = f"{remote_dir}/{file_name}"
 
-        transport = paramiko.Transport((settings.ftp_host, settings.ftp_port))
-        if settings.ftp_key_path:
-            key = paramiko.RSAKey.from_private_key_file(settings.ftp_key_path)
-            transport.connect(username=settings.ftp_username, pkey=key)
-        else:
-            raise StorageError("FTP key path not configured")
+        def _ftp_upload():
+            """Synchronous FTP upload (wrapped in thread)."""
+            ftp = FTP()
+            ftp.connect(settings.ftp_host, settings.ftp_port, timeout=30)
+            ftp.login(settings.ftp_username, settings.ftp_password or "")
 
-        sftp = paramiko.SFTPClient.from_transport(transport)
-        try:
-            sftp.makedirs(remote_dir)
-        except Exception:
-            pass
-        sftp.put(str(local_file), remote_path)
-        sftp.close()
-        transport.close()
+            try:
+                if remote_dir != "/":
+                    ftp.cwd(remote_dir)
+            except all_errors:
+                pass
 
-        url = f"sftp://{settings.ftp_host}{remote_path}"
-        logger.info("Uploaded to SFTP: %s", remote_path)
+            with open(local_file, "rb") as f:
+                ftp.storbinary(f"STOR {file_name}", f)
+
+            ftp.quit()
+
+        await asyncio.to_thread(_ftp_upload)
+
+        url = f"ftp://{settings.ftp_host}{remote_path}"
+        logger.info("[FTP-UPLOAD] Uploaded to FTP: %s", remote_path)
         return "ftp", url
 
     except Exception as exc:
-        logger.error("SFTP upload failed: %s — falling back to local", exc)
+        logger.error("[FTP-UPLOAD-ERROR] FTP upload failed: %s — falling back to local", exc)
         return _upload_local(local_file, machine_id, file_name)
 
 

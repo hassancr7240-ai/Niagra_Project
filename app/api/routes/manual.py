@@ -726,13 +726,23 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
             log.warning("raw_finalize failed: %s", e)
 
     try:
+        log.critical("[%s] [PIPELINE-TASK-START] _run_pipeline_task starting", manual_id)
+
+        log.critical("[%s] [PIPELINE-CALLING-DIRECT] About to call _run_pipeline_direct", manual_id)
         result = await _run_pipeline_direct(manual_id, pdf_path, _raw_update)
+        log.critical("[%s] [PIPELINE-DIRECT-RETURNED] Got result from _run_pipeline_direct: result=%s", manual_id, "TUPLE" if result else "None/False")
+
         # CALLBACK FIRES HERE after extraction completes
         if result:
+            log.critical("[%s] [PIPELINE-RESULT-VALID] Result is valid, unpacking...", manual_id)
             tasks_json, manufacturer, chapters_json, machine_id = result
-            log.critical("[PIPELINE-EXTRACTION-DONE] Calling finalize_fn for %s", manual_id)
+            log.critical("[%s] [PIPELINE-CALLBACK-ABOUT-TO-CALL] About to call finalize_fn with manufacturer=%s machine_id=%s", manual_id, manufacturer, machine_id)
             await _raw_finalize(tasks_json, manufacturer, chapters_json, machine_id)
+            log.critical("[%s] [PIPELINE-CALLBACK-COMPLETE] finalize_fn completed successfully", manual_id)
+        else:
+            log.critical("[%s] [PIPELINE-RESULT-NULL] Result is None/False - callback will NOT fire! result=%s", manual_id, result)
     except Exception as exc:
+        log.critical("[%s] [PIPELINE-EXCEPTION] Exception in pipeline task: %s", manual_id, str(exc)[:500])
         log.error("Background pipeline task failed for %s: %s", manual_id, exc)
         await _raw_update("FAILED", str(exc))
     finally:

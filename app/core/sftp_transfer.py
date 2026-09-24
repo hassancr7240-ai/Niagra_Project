@@ -128,9 +128,14 @@ async def upload_extracted_tasks(
         logger.info("[%s] [FTP-SKIP] FTP not configured, skipping upload", manual_id)
         return True
 
-    logger.info("[%s] [FTP-CONFIG] host=%s port=%s user=%s", manual_id,
+    # Check if password is resolved or still a Key Vault reference
+    pwd_status = "RESOLVED" if (config.pmw_file_transfer_password and not config.pmw_file_transfer_password.startswith("@")) else "REFERENCE"
+    logger.info("[%s] [FTP-CONFIG] host=%s port=%s user=%s pwd_status=%s", manual_id,
                 config.pmw_file_transfer_host, config.pmw_file_transfer_port,
-                config.pmw_file_transfer_username)
+                config.pmw_file_transfer_username, pwd_status)
+
+    if pwd_status == "REFERENCE":
+        logger.critical("[%s] [FTP-ERROR] Password is STILL a Key Vault reference (NOT RESOLVED) - will FAIL at connection!", manual_id)
 
     from datetime import datetime
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

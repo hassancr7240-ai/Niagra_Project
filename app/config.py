@@ -161,6 +161,73 @@ class Settings(BaseSettings):
     def jwt_algorithm(self) -> str:
         return "RS256" if self.use_azure_ad else "HS256"
 
+    def resolve_secret(self, value: Optional[str]) -> Optional[str]:
+        """
+        Resolve Azure Key Vault references in config values.
+        Format: @Microsoft.KeyVault(SecretUri=https://vault-name.vault.azure.net/secrets/secret-name/)
+        """
+        if not value or not value.startswith("@Microsoft.KeyVault"):
+            return value
+
+        import logging
+        log = logging.getLogger(__name__)
+
+        try:
+            # Extract SecretUri from reference
+            start = value.find("SecretUri=") + len("SecretUri=")
+            end = value.find(")", start)
+            if start == len("SecretUri=") - 1 or end == -1:
+                log.error("[CONFIG-KEYVAULT] Invalid Key Vault reference format: %s", value[:50])
+                return None
+
+            secret_uri = value[start:end]
+            log.info("[CONFIG-KEYVAULT] Attempting to resolve secret from: %s", secret_uri[:80])
+
+            # Use Azure SDK to fetch secret
+            try:
+                from azure.identity import DefaultAzureCredential
+                from azure.keyvault.secrets import SecretClient
+
+                # Extract vault URL from secret URI (e.g., https://vault.vault.azure.net/secrets/name/)
+                vault_url = secret_uri.split("/secrets/")[0]
+                log.info("[CONFIG-KEYVAULT] Connecting to vault: %s", vault_url)
+
+                credential = DefaultAzureCredential()
+                client = SecretClient(vault_url=vault_url, credential=credential)
+
+                # Extract secret name from URI
+                secret_name = secret_uri.split("/secrets/")[1].rstrip("/")
+                log.info("[CONFIG-KEYVAULT] Fetching secret: %s", secret_name)
+
+                secret = client.get_secret(secret_name)
+                log.critical("[CONFIG-KEYVAULT] Successfully resolved secret: %s", secret_name)
+                return secret.value
+
+            except Exception as e:
+                log.error("[CONFIG-KEYVAULT] Failed to fetch from Key Vault: %s", str(e)[:200])
+                return None
+
+        except Exception as e:
+            log.error("[CONFIG-KEYVAULT] Error resolving reference: %s", str(e)[:200])
+            return None
+
+    def model_post_init(self, __context) -> None:
+        """Post-init hook to resolve Key Vault references after settings are loaded."""
+        import logging
+        log = logging.getLogger(__name__)
+
+        # Resolve Key Vault references for sensitive config values
+        log.info("[CONFIG-POST-INIT] Resolving Key Vault references")
+
+        if self.pmw_file_transfer_password and self.pmw_file_transfer_password.startswith("@Microsoft"):
+            log.info("[CONFIG-RESOLVE] Resolving FTP password from Key Vault")
+            resolved = self.resolve_secret(self.pmw_file_transfer_password)
+            if resolved:
+                self.pmw_file_transfer_password = resolved
+                log.critical("[CONFIG-RESOLVE] FTP password resolved successfully")
+            else:
+                log.error("[CONFIG-RESOLVE] Failed to resolve FTP password - using reference as-is (will fail at runtime)")
+
 
 @lru_cache
 def get_settings() -> Settings:

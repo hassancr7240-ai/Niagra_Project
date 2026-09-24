@@ -708,10 +708,10 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
                 # Call ERP API
                 erp_ok = await send_to_erp(
                     manual_id=manual_id,
-                    manufacturer=manufacturer,
                     machine_id=inferred_machine_id or "UNKNOWN",
-                    email_id="system@niagara.local",  # TODO: get from user context
+                    email_id="system@niagara.local",
                     config=settings,
+                    manufacturer=manufacturer,
                 )
                 log.info("[%s] ERP API call: %s", manual_id, "SUCCESS" if erp_ok else "FAILED")
 
@@ -726,7 +726,12 @@ async def _run_pipeline_task(manual_id: str, pdf_path: Path) -> None:
             log.warning("raw_finalize failed: %s", e)
 
     try:
-        await _run_pipeline_direct(manual_id, pdf_path, _raw_update, _raw_finalize)
+        result = await _run_pipeline_direct(manual_id, pdf_path, _raw_update)
+        # CALLBACK FIRES HERE after extraction completes
+        if result:
+            tasks_json, manufacturer, chapters_json, machine_id = result
+            log.critical("[PIPELINE-EXTRACTION-DONE] Calling finalize_fn for %s", manual_id)
+            await _raw_finalize(tasks_json, manufacturer, chapters_json, machine_id)
     except Exception as exc:
         log.error("Background pipeline task failed for %s: %s", manual_id, exc)
         await _raw_update("FAILED", str(exc))
@@ -765,10 +770,10 @@ def _infer_machine_id(manufacturer: str, model: Optional[str], filename: str = "
     return ""
 
 
-async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finalize_fn) -> None:
+async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn) -> tuple:
     """
-    Runs the full RAG pipeline calling await update_fn(status) for progress updates
-    and await finalize_fn(tasks_json, manufacturer, chapters_json, machine_id) when done.
+    Runs the full RAG pipeline calling await update_fn(status) for progress updates.
+    Returns (tasks_json, manufacturer, chapters_json, machine_id) for callback.
     All DB writes go through async ORM sessions — no sync blocking on the event loop.
     """
     import json
@@ -1223,12 +1228,14 @@ async def _run_pipeline_direct(manual_id: str, pdf_path: Path, update_fn, finali
         log.info("[%s] Validation passed: all %d tasks have citations", manual_id, len(extracted_tasks))
 
     log.info("[%s] Extracted %d tasks — writing to DB", manual_id, len(extracted_tasks))
+    log.critical("[%s] EXTRACTION COMPLETE — returning results for callback", manual_id)
 
-    log.critical("[CALLBACK-ABOUT-TO-CALL] Calling finalize_fn now for %s", manual_id)
-    await finalize_fn(
+    # Return results so caller can invoke callback with actual data
+    return (
         json.dumps(extracted_tasks),
         classification.manufacturer,
         json.dumps(classification.detected_chapters),
         inferred_machine_id,
     )
-    log.critical("[CALLBACK-RETURNED] finalize_fn completed for %s", manual_id)
+        sys.stderr.flush()
+        raise

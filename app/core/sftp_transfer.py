@@ -110,20 +110,33 @@ async def upload_extracted_tasks(
     Returns:
         True if upload successful, False otherwise.
     """
+    logger.critical("[%s] [SFTP-START] upload_extracted_tasks called", manual_id)
+
     if not config.pmw_file_transfer_host or not config.pmw_file_transfer_username:
-        logger.info("SFTP not configured, skipping upload")
+        logger.info("[%s] [SFTP-SKIP] SFTP not configured, skipping upload", manual_id)
         return True
+
+    logger.info("[%s] [SFTP-CONFIG] host=%s port=%s user=%s", manual_id,
+                config.pmw_file_transfer_host, config.pmw_file_transfer_port,
+                config.pmw_file_transfer_username)
 
     from datetime import datetime
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     remote_filename = f"{manual_id}_TASKS_{timestamp}.zip"
+    logger.info("[%s] [SFTP-FILENAME] %s", manual_id, remote_filename)
 
-    return await upload_file_to_sftp(
-        local_file_path=zip_file_path,
-        remote_filename=remote_filename,
-        host=config.pmw_file_transfer_host,
-        port=int(config.pmw_file_transfer_port),
-        username=config.pmw_file_transfer_username,
-        password=config.pmw_file_transfer_password,
-        remote_dir=config.pmw_file_transfer_incoming_dir,
-    )
+    try:
+        result = await upload_file_to_sftp(
+            local_file_path=zip_file_path,
+            remote_filename=remote_filename,
+            host=config.pmw_file_transfer_host,
+            port=int(config.pmw_file_transfer_port),
+            username=config.pmw_file_transfer_username,
+            password=config.pmw_file_transfer_password,
+            remote_dir=config.pmw_file_transfer_incoming_dir,
+        )
+        logger.critical("[%s] [SFTP-RESULT] %s", manual_id, "SUCCESS" if result else "FAILED")
+        return result
+    except Exception as e:
+        logger.error("[%s] [SFTP-ERROR] %s", manual_id, e)
+        return False

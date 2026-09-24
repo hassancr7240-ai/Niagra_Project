@@ -88,6 +88,7 @@ async def send_to_erp(
     machine_id: str,
     email_id: str,
     config,
+    manufacturer: str = "",
 ) -> bool:
     """
     Send extracted PM tasks to ERP system.
@@ -97,25 +98,34 @@ async def send_to_erp(
         machine_id: Machine ID (e.g., "TETRAPAK-ASEPTIC-L3")
         email_id: Engineer email
         config: Settings with ERP credentials
+        manufacturer: Manufacturer name (for logging)
 
     Returns:
         True if successful, False otherwise.
     """
+    logger.critical("[%s] [ERP-START] send_to_erp called (manufacturer=%s)", manual_id, manufacturer)
+
     if not config.erp_api_key:
-        logger.info("ERP API key not configured, skipping work definition creation")
+        logger.info("[%s] [ERP-SKIP] ERP API key not configured, skipping", manual_id)
         return True
 
     work_definition_name = f"{machine_id} PM - {manual_id}"
     org_code = config.erp_org_code or "All"
 
+    logger.info("[%s] [ERP-CONFIG] url=%s org=%s email=%s", manual_id,
+                config.erp_api_url, org_code, email_id)
+    logger.info("[%s] [ERP-PAYLOAD] work_definition_name=%s", manual_id, work_definition_name)
+
     try:
-        return await create_work_definition(
+        result = await create_work_definition(
             work_definition_name=work_definition_name,
             org_code=org_code,
             email_id=email_id,
             api_url=config.erp_api_url,
             api_key=config.erp_api_key,
         )
+        logger.critical("[%s] [ERP-RESULT] %s", manual_id, "SUCCESS" if result else "FAILED")
+        return result
     except ERPIntegrationError as e:
-        logger.error("Failed to send to ERP: %s", e)
+        logger.error("[%s] [ERP-ERROR] %s", manual_id, e)
         return False
